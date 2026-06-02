@@ -595,7 +595,6 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
-    
     enable_pd_separation: bool = SchedulerConfig.enable_pd_separation
     pd_scheduling_policy: str = SchedulerConfig.pd_scheduling_policy
 

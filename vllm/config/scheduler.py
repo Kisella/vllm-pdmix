@@ -153,7 +153,7 @@ class SchedulerConfig:
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
-    
+
     enable_pd_separation: bool = False
     """If True, the scheduler will separate prefill and decode requests
     into different steps, avoiding PD-mixed batches."""

@@ -1044,7 +1044,7 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         run_rpc_broadcast_mq = True
-        run_local_rpc_broadcast_mq = False   
+        run_local_rpc_broadcast_mq = False
         while True:
             # Poll local MQ for pp scheduler output from passive
             # EngineCore (non-blocking).

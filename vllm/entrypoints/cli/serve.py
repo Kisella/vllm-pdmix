@@ -187,7 +187,7 @@ def run_headless(args: argparse.Namespace):
         # receive scheduler_output via inner_dp_world_group from the leader.
         host = parallel_config.master_addr
         head_node_address = f"{host}:{parallel_config.master_port}"
-        
+
         # Set up PP scheduler ZMQ address for pp rank1 to subscribe
         # to SchedulerOutput from pp rank0's EngineCore.
         if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None:
@@ -203,7 +203,6 @@ def run_headless(args: argparse.Namespace):
                 "PP scheduler ZMQ subscriber address: %s",
                 os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
             )
-
 
         logger.info(
             "Launching vLLM (v%s) headless passive EngineCore, "

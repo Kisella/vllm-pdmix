@@ -273,6 +273,7 @@ class PPSchedulerZmqSubscriber:
         except Exception:
             pass
 
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -412,7 +413,7 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
-        
+
         # Set up PP scheduler ZMQ publisher if configured.
         # This publishes SchedulerOutput to pp rank1's PassiveEngineCore.
         self._pp_scheduler_zmq_publisher: PPSchedulerZmqPublisher | None = None
@@ -636,7 +637,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        
+
         # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
         if self._pp_scheduler_zmq_publisher is not None:
             self._pp_scheduler_zmq_publisher.publish(scheduler_output)
@@ -699,7 +700,7 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            
+
             # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
             if self._pp_scheduler_zmq_publisher is not None:
                 self._pp_scheduler_zmq_publisher.publish(scheduler_output)
@@ -2418,16 +2419,17 @@ class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
             engine_index=dp_rank,
         )
 
+
 class PassiveEngineCoreProc:
     """Passive EngineCore process for non-leader PP ranks.
 
     Mirrors the `EngineCore` / `EngineCoreProc` shape on rank0:
 
     - `step()` is the single-tick action: poll the ZMQ inbox, ask the
-    `PassiveScheduler` for one batch, fan its slice plan out to the
-    worker `rpc_broadcast_mq`.
+      `PassiveScheduler` for one batch, fan its slice plan out to the
+      worker `rpc_broadcast_mq`.
     - `run_busy_loop()` is the long-running driver that keeps calling
-    `step()` until the executor reports failure.
+      `step()` until the executor reports failure.
 
     Unlike rank0, there is no local scheduling decision — every batch
     comes pre-decided over ZMQ from the leader rank. The static

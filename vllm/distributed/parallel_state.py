@@ -331,7 +331,6 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
-
         # Store all group_ranks so that create_alternate_groups can
         # iterate over every subgroup — torch.distributed.new_group
         # is a collective on the default group and must be called by
@@ -752,7 +751,7 @@ class GroupCoordinator:
         assert src != self.rank_in_group, (
             "Invalid source rank. Source rank is the same as the current rank."
         )
-        
+
         cpu_group = self.alt_cpu_group if use_alt_group else self.cpu_group
 
         size_tensor = torch.empty(1, dtype=torch.long, device="cpu")

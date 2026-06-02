@@ -27,6 +27,7 @@ else:
     SamplingParams = object
     Request = object
 
+
 class BatchType(enum.Enum):
     """Composition of a single SchedulerOutput batch.
 
@@ -45,6 +46,7 @@ class BatchType(enum.Enum):
     PURE_PREFILL = "pure_prefill"
     PURE_DECODE = "pure_decode"
     EMPTY = "empty"
+
 
 @dataclass
 class NewRequestData:
@@ -258,7 +260,7 @@ class SchedulerOutput:
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
-    
+
     # Composition of the scheduled batch. Producers (schedulers) tag this
     # field so downstream consumers — notably the non-leader PP rank's
     # PassiveScheduler — can route the batch without re-inspecting per-request
