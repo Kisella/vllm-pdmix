@@ -1613,7 +1613,7 @@ def initialize_model_parallel(
         )
         assert _EP is None, "expert parallel group is already initialized"
         _EP = init_model_parallel_group(
-            [[r] for r in all_ranks],
+            [tp_edge_ranks, tp_cloud_ranks],
             get_world_group().local_rank,
             backend,
             group_name="ep",
