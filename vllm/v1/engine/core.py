@@ -300,6 +300,12 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        if vllm_config.parallel_config.enable_edge_cloud:
+            logger.info(
+                "Edge-cloud mode enabled (enable_pd_separation=%s)",
+                vllm_config.parallel_config.enable_pd_separation,
+            )
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
@@ -2456,6 +2462,12 @@ class PassiveEngineCoreProc:
         self.passive_scheduler = PassiveScheduler(
             vllm_config, pp_subscriber, dispatch_policy=dispatch_policy
         )
+        if vllm_config.parallel_config.enable_edge_cloud:
+            logger.info(
+                "PassiveEngineCore: edge-cloud mode enabled "
+                "(enable_pd_separation=%s)",
+                vllm_config.parallel_config.enable_pd_separation,
+            )
         self._idle_sleep_seconds = 0.001
 
     def step(self) -> bool:
