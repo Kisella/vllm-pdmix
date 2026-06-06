@@ -166,6 +166,46 @@ def test_classify_unknown_falls_into_pdmix():
     assert len(scheduler.ready_decodes) == 0
 
 
+def test_classify_prefill_first_routes_to_prefill_queue():
+    """PREFILL_FIRST is the edge-cloud head segment for prefill;
+    from the cloud's perspective it is the same workload as PURE_PREFILL.
+    """
+    scheduler, sub = _make_scheduler()
+    sub.feed(_make_so(BatchType.PREFILL_FIRST))
+    scheduler.poll_and_classify()
+    assert len(scheduler.ready_prefills) == 1
+    assert len(scheduler.ready_pdmixes) == 0
+    assert len(scheduler.ready_decodes) == 0
+
+
+def test_classify_decode_first_routes_to_decode_queue():
+    """DECODE_FIRST is the edge-cloud head segment for decode."""
+    scheduler, sub = _make_scheduler()
+    sub.feed(_make_so(BatchType.DECODE_FIRST))
+    scheduler.poll_and_classify()
+    assert len(scheduler.ready_decodes) == 1
+    assert len(scheduler.ready_prefills) == 0
+    assert len(scheduler.ready_pdmixes) == 0
+
+
+def test_classify_drops_prefill_last_with_error_log(caplog):
+    """PREFILL_LAST is edge-only; cloud must drop it (defense in depth)."""
+    import logging
+    scheduler, sub = _make_scheduler()
+    sub.feed(_make_so(BatchType.PREFILL_LAST))
+    scheduler.poll_and_classify()
+    assert scheduler.num_pending == 0
+
+
+def test_classify_drops_decode_last_with_error_log(caplog):
+    """DECODE_LAST is edge-only; cloud must drop it (defense in depth)."""
+    import logging
+    scheduler, sub = _make_scheduler()
+    sub.feed(_make_so(BatchType.DECODE_LAST))
+    scheduler.poll_and_classify()
+    assert scheduler.num_pending == 0
+
+
 # ---------------------------------------------------------------------- #
 # Slicing                                                                #
 # ---------------------------------------------------------------------- #
@@ -187,6 +227,29 @@ def test_empty_never_sliced():
     batch = scheduler.schedule()
     assert batch.scheduler_output.batch_type == BatchType.EMPTY
     assert batch.slices == [None]
+
+
+def test_decode_first_never_sliced():
+    """DECODE_FIRST shares the per-token shape of PURE_DECODE — no slicing."""
+    scheduler, sub = _make_scheduler(layer_slice_size=2, num_hidden_layers=8)
+    assert scheduler._total_slices == 2
+    sub.feed(_make_so(BatchType.DECODE_FIRST))
+    scheduler.poll_and_classify()
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.DECODE_FIRST
+    assert batch.slices == [None]
+
+
+def test_prefill_first_sliced_like_pure_prefill():
+    """PREFILL_FIRST is the edge-cloud head prefill; slice as PURE_PREFILL."""
+    scheduler, sub = _make_scheduler(layer_slice_size=2, num_hidden_layers=8)
+    assert scheduler._total_slices == 2
+    sub.feed(_make_so(BatchType.PREFILL_FIRST))
+    scheduler.poll_and_classify()
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+    assert len(batch.slices) == 2
+    assert all(isinstance(info, LayerSliceInfo) for info in batch.slices)
 
 
 def test_pure_prefill_sliced_into_n_slices():

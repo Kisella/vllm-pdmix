@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_PP_NON_LEADER_ENGINE_CORE: bool = False
     VLLM_PP_SCHEDULER_ZMQ_ADDR: str | None = None
+    VLLM_PP_PRE_OUT_ZMQ_PORT: int = 5558
+    VLLM_PP_POST_OUT_ZMQ_PORT: int = 5559
     VLLM_LAYER_SLICE_SIZE: int = 0
     VLLM_PP_PASSIVE_DISPATCH_POLICY: str = "prefill_first"
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -755,6 +757,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # "tcp://192.168.1.1:5558" for connecting).
     "VLLM_PP_SCHEDULER_ZMQ_ADDR": lambda: os.getenv(
         "VLLM_PP_SCHEDULER_ZMQ_ADDR", None
+    ),
+    # ZMQ port for the edge-cloud PD-separation PRE_OUT channel: edge rank0
+    # publishes SchedulerOutputs (PREFILL_FIRST / DECODE_FIRST / EMPTY) to
+    # the cloud's PassiveEngineCore. Edge binds, cloud connects. The full
+    # endpoint is constructed at runtime as tcp://<master_addr>:<port> on
+    # the cloud side and tcp://*:<port> on the edge side.
+    "VLLM_PP_PRE_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_PRE_OUT_ZMQ_PORT", "5558")
+    ),
+    # ZMQ port for the edge-cloud PD-separation POST_OUT channel: cloud
+    # PassiveEngineCore publishes the post-middle-layer SchedulerOutput
+    # (rewritten with batch_type = PREFILL_LAST / DECODE_LAST) back to the
+    # edge rank0 so the edge can pop the tail-segment work from
+    # `prefills_last_ready` / `decodes_last_ready`. Cloud binds, edge
+    # connects. Endpoint = tcp://<cloud_addr>:<port> on edge,
+    # tcp://*:<port> on cloud.
+    "VLLM_PP_POST_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_POST_OUT_ZMQ_PORT", "5559")
     ),
     # Layer slice size for non-leader PP ranks. When > 0, the local layer
     # range of a SchedulerOutput is sliced into groups of this size and each

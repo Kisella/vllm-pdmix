@@ -66,9 +66,9 @@ class ScheduledBatch:
     """Output of `PassiveScheduler.schedule()`: one SchedulerOutput plus the
     plan for how to slice it across layer ranges.
 
-    - For PURE_DECODE / EMPTY batches, or when slicing is disabled:
-      ``slices == [None]`` (single full-layer execution, no slice metadata).
-    - For PURE_PREFILL / PD_MIX batches with slicing enabled:
+    - For PURE_DECODE / DECODE_FIRST / EMPTY batches, or when slicing is
+      disabled: ``slices == [None]`` (single full-layer execution).
+    - For PURE_PREFILL / PREFILL_FIRST / PD_MIX batches with slicing enabled:
       ``slices == [LayerSliceInfo(0), ..., LayerSliceInfo(N-1)]``.
 
     An empty instance (``slices == []``) signals that no SchedulerOutput was
@@ -214,12 +214,28 @@ class PassiveScheduler:
             except queue.Empty:
                 break
             bt = scheduler_output.batch_type
+            print(f"Received scheduler_output from edge, batch_type: {bt}",flush=True)
             if bt == BatchType.EMPTY:
                 self.ready_empties.append(scheduler_output)
-            elif bt == BatchType.PURE_PREFILL:
+            elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
+                # PREFILL_FIRST = edge-cloud "P first" head segment; from the
+                # cloud's perspective it is exactly the same workload as a
+                # legacy PURE_PREFILL batch (run middle layers, send hidden
+                # state back), so route into the same ready queue.
                 self.ready_prefills.append(scheduler_output)
-            elif bt == BatchType.PURE_DECODE:
+            elif bt in (BatchType.PURE_DECODE, BatchType.DECODE_FIRST):
+                # Same reasoning as above for decode head segments.
                 self.ready_decodes.append(scheduler_output)
+            elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
+                # Tail-segment batches are edge-only and must never be
+                # dispatched on the cloud. If one shows up here it is a
+                # routing bug at the publisher side — drop with a loud log.
+                logger.error(
+                    "PassiveScheduler received tail-segment batch_type=%s; "
+                    "tail segments are edge-only and will be dropped.",
+                    bt.value,
+                )
+                continue
             else:  # PD_MIX (or anything unrecognized — treat as mix)
                 self.ready_pdmixes.append(scheduler_output)
             logger.debug(
@@ -258,13 +274,19 @@ class PassiveScheduler:
     def _slice_for(
         self, so: SchedulerOutput
     ) -> list["LayerSliceInfo | None"]:
-        # Pure decode and empty batches are never sliced.
-        if so.batch_type in (BatchType.PURE_DECODE, BatchType.EMPTY):
+        # Decode-like and empty batches are never sliced. DECODE_FIRST is the
+        # edge-cloud head segment of a decode step — same per-token shape as
+        # PURE_DECODE, so it follows the same no-slice rule.
+        if so.batch_type in (
+            BatchType.PURE_DECODE,
+            BatchType.DECODE_FIRST,
+            BatchType.EMPTY,
+        ):
             return [None]
         # Slicing disabled or trivially 1 slice.
         if self._total_slices <= 1:
             return [None]
-        # PURE_PREFILL / PD_MIX → expand into N slice payloads.
+        # PURE_PREFILL / PREFILL_FIRST / PD_MIX → expand into N slice payloads.
         return [self._make_slice_info(i) for i in range(self._total_slices)]
 
     # ------------------------------------------------------------------ #

@@ -10,11 +10,11 @@ Or directly:
 
 These tests verify that when enable_pd_separation=True:
 1. schedule() returns either a pure-prefill or pure-decode batch, never mixed.
-2. chunk_prefill queue correctly holds RUNNING requests whose prefill is not done.
+2. chunk_prefill_first queue correctly holds RUNNING requests whose prefill is not done.
 3. running queue only holds decode-phase requests.
 4. chunk_num increments after each prefill chunk.
 5. is_last_prefill_chunk() works correctly.
-6. Preempted chunk_prefill requests return to chunk_prefill (not waiting).
+6. Preempted chunk_prefill_first requests return to chunk_prefill_first (not waiting).
 7. Empty-phase batches auto-switch to the other phase.
 8. All three scheduling policies (prefill_first, decode_first, strict_alternation)
    behave as expected.
@@ -48,7 +48,7 @@ def _simulate_step(scheduler, requests):
     Returns (output, phase_hint) where phase_hint is inferred from the
     scheduler state before scheduling.
     """
-    had_prefill = bool(scheduler.chunk_prefill or scheduler.waiting)
+    had_prefill = bool(scheduler.chunk_prefill_first or scheduler.waiting)
     had_decode = bool(scheduler.running)
     output = scheduler.schedule()
     sampled = []
@@ -113,7 +113,7 @@ class TestPDSeparationBasic:
         assert had_prefill
         # All tokens scheduled (6 > 1) so it is clearly prefill.
         assert output.num_scheduled_tokens[req.request_id] == 6
-        assert len(scheduler.chunk_prefill) == 0
+        assert len(scheduler.chunk_prefill_first) == 0
         assert len(scheduler.running) == 1  # migrated after schedule
 
         # Step 2: only decode requests remain -> decode batch.
@@ -122,7 +122,7 @@ class TestPDSeparationBasic:
         assert _all_are_decode(output, scheduler)
         assert output.num_scheduled_tokens[req.request_id] == 1
 
-    def test_chunked_prefill_stays_in_chunk_prefill(self):
+    def test_chunked_prefill_stays_in_chunk_prefill_first(self):
         scheduler = create_scheduler(
             max_num_batched_tokens=4,
             max_num_seqs=4,
@@ -136,18 +136,18 @@ class TestPDSeparationBasic:
         output, _, _ = _simulate_step(scheduler, [req])
         assert output.num_scheduled_tokens[req.request_id] == 4
         assert req.is_prefill_chunk
-        assert req in scheduler.chunk_prefill
+        assert req in scheduler.chunk_prefill_first
         assert req not in scheduler.running
 
         # Step 2: prefill chunk 2 (4 tokens).
         output, _, _ = _simulate_step(scheduler, [req])
         assert output.num_scheduled_tokens[req.request_id] == 4
-        assert req in scheduler.chunk_prefill
+        assert req in scheduler.chunk_prefill_first
 
         # Step 3: prefill chunk 3 (2 tokens) -> completes prefill.
         output, _, _ = _simulate_step(scheduler, [req])
         assert output.num_scheduled_tokens[req.request_id] == 2
-        assert req not in scheduler.chunk_prefill
+        assert req not in scheduler.chunk_prefill_first_first
         assert req in scheduler.running
         assert not req.is_prefill_chunk
 
@@ -198,7 +198,7 @@ class TestPDSeparationBasic:
         scheduler.add_request(req)
         # First prefill.
         _simulate_step(scheduler, [req])
-        # Now running has the decode request, chunk_prefill/waiting are empty.
+        # Now running has the decode request, chunk_prefill_first/waiting are empty.
         # Next schedule should auto-switch to decode even though phase=prefill.
         output, _, _ = _simulate_step(scheduler, [req])
         assert _all_are_decode(output, scheduler)
@@ -284,8 +284,8 @@ class TestPDSeparationPolicies:
 class TestPDSeparationPreemption:
     """Preemption behaviour under PD separation."""
 
-    def test_preempt_chunk_prefill_request(self):
-        """Directly test _preempt_request for a chunk_prefill request."""
+    def test_preempt_chunk_prefill_first_request(self):
+        """Directly test _preempt_request for a chunk_prefill_first request."""
         scheduler = create_scheduler(
             max_num_batched_tokens=8,
             max_num_seqs=4,
@@ -296,10 +296,10 @@ class TestPDSeparationPreemption:
         req.status = RequestStatus.RUNNING
         req.num_computed_tokens = 4
         req.is_prefill_chunk = True
-        scheduler.chunk_prefill.append(req)
+        scheduler.chunk_prefill_first.append(req)
 
         scheduler._preempt_request(req, 0.0)
-        assert req in scheduler.chunk_prefill
+        assert req in scheduler.chunk_prefill_first
         assert req.status == RequestStatus.PREEMPTED
         assert req.num_computed_tokens == 4  # progress preserved
         assert req.num_preemptions == 1
@@ -320,7 +320,7 @@ class TestPDSeparationPreemption:
 
         scheduler._preempt_request(req, 0.0)
         assert req not in scheduler.running
-        assert req not in scheduler.chunk_prefill
+        assert req not in scheduler.chunk_prefill_first
         assert req.status == RequestStatus.PREEMPTED
         assert req.num_computed_tokens == 0  # decode resets
         assert req.num_preemptions == 1
@@ -352,12 +352,12 @@ class TestPDSeparationMultipleRequests:
         # Step 2: prefill batch for long_req (4 tokens).
         output, _, _ = _simulate_step(scheduler, [short1, short2, long_req])
         assert output.num_scheduled_tokens[long_req.request_id] == 4
-        assert long_req in scheduler.chunk_prefill
+        assert long_req in scheduler.chunk_prefill_first
 
         # Step 3: prefill batch for long_req (4 tokens).
         output, _, _ = _simulate_step(scheduler, [short1, short2, long_req])
         assert output.num_scheduled_tokens[long_req.request_id] == 4
-        assert long_req in scheduler.chunk_prefill
+        assert long_req in scheduler.chunk_prefill_first
 
         # Step 4: prefill batch for long_req (2 tokens) -> finishes prefill.
         output, _, _ = _simulate_step(scheduler, [short1, short2, long_req])
@@ -368,3 +368,116 @@ class TestPDSeparationMultipleRequests:
         output, _, _ = _simulate_step(scheduler, [short1, short2, long_req])
         assert _all_are_decode(output, scheduler)
         assert len(output.num_scheduled_tokens) == 3
+
+
+class TestPDSeparationEdgeCloudTagging:
+    """Verify edge-cloud batch_type tagging on the edge side."""
+
+    def test_prefill_first_tagging_when_pd_separation_enabled(self):
+        """A non-empty prefill batch from PDSeparatedScheduler.schedule()
+        should be tagged PREFILL_FIRST (the head segment for the cloud).
+        """
+        from vllm.v1.core.sched.output import BatchType
+        scheduler = create_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+            max_model_len=32,
+            enable_pd_separation=True,
+        )
+        req = create_requests(num_requests=1, num_tokens=6, max_tokens=4)[0]
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+        assert output.batch_type == BatchType.PREFILL_FIRST
+        assert output.num_scheduled_tokens[req.request_id] == 6
+
+    def test_empty_prefill_first_tagged_empty(self):
+        """If the schedule call produces no tokens, the batch_type should
+        downgrade to EMPTY (sync messages must be cheap).
+        """
+        from vllm.v1.core.sched.output import BatchType
+        scheduler = create_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+            max_model_len=32,
+            enable_pd_separation=True,
+        )
+        # No requests at all -> auto-switch to decode, then to prefill-first;
+        # both empty paths produce EMPTY.
+        output = scheduler.schedule()
+        assert output.batch_type == BatchType.EMPTY
+
+
+class TestPDSeparationPrefillLast:
+    """Behavior of prefills_last_ready / _pick_prefill_last_batch.
+
+    These tests exercise the cloud → edge round-trip without spinning up
+    real ZMQ: we manually push a cloud-rewritten SchedulerOutput into
+    prefills_last_ready and check that the scheduler pops it correctly.
+    """
+
+    def test_prefills_last_ready_wins_over_other_phases(self):
+        """PREFILL_LAST has the highest priority in _select_scheduling_phase."""
+        from vllm.v1.core.sched.output import BatchType, SchedulerOutput
+        scheduler = create_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+            max_model_len=32,
+            enable_pd_separation=True,
+        )
+        # Stage a PREFILL_LAST batch returned from the cloud.
+        so_last = SchedulerOutput.make_empty()
+        so_last.batch_type = BatchType.PREFILL_LAST
+        scheduler.prefills_last_ready.append(so_last)
+
+        # Also stage other work — it must be ignored this round.
+        new_req = create_requests(num_requests=1, num_tokens=4, max_tokens=4)[0]
+        scheduler.add_request(new_req)
+
+        output = scheduler.schedule()
+        assert output.batch_type == BatchType.PREFILL_LAST
+        # The PREFILL_LAST batch we staged was empty, so no tokens scheduled.
+        assert output.total_num_scheduled_tokens == 0
+        # The just-added prefill request is still pending.
+        assert new_req in scheduler.waiting or new_req in scheduler.running
+
+    def test_pick_prefill_last_drops_reqs_from_chunk_prefill_first(self):
+        """_pick_prefill_last_batch must remove the involved request IDs
+        from chunk_prefill_first so update_from_output does not double-account.
+        """
+        from vllm.v1.core.sched.output import BatchType, SchedulerOutput
+        scheduler = create_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+            max_model_len=32,
+            enable_pd_separation=True,
+        )
+        # Drive a request into chunk_prefill_first by simulating a partial
+        # prefill chunk.
+        req = create_requests(num_requests=1, num_tokens=10, max_tokens=4)[0]
+        scheduler.add_request(req)
+        _simulate_step(scheduler, [req])  # 8-token chunk → still in chunk_prefill_first
+        assert req in scheduler.chunk_prefill_first
+
+        # Stage a cloud-returned PREFILL_LAST for this request.
+        so_last = SchedulerOutput.make_empty()
+        so_last.batch_type = BatchType.PREFILL_LAST
+        so_last.num_scheduled_tokens = {req.request_id: 1}
+        scheduler.prefills_last_ready.appendleft(so_last)
+
+        output = scheduler._pick_prefill_last_batch()
+        assert output.batch_type == BatchType.PREFILL_LAST
+        # The req must have been removed from chunk_prefill_first.
+        assert req not in scheduler.chunk_prefill_first
+
+    def test_pick_prefill_last_empty_when_no_ready(self):
+        """If prefills_last_ready is empty, _pick_prefill_last_batch returns
+        an empty SchedulerOutput rather than raising.
+        """
+        scheduler = create_scheduler(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+            max_model_len=32,
+            enable_pd_separation=True,
+        )
+        output = scheduler._pick_prefill_last_batch()
+        assert output.total_num_scheduled_tokens == 0

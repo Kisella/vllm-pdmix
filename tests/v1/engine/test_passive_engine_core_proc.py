@@ -104,6 +104,7 @@ def _make_proc(
     layer_slice_size: int = 0,
     num_hidden_layers: int = 8,
     pp_size: int = 2,
+    pp_pd_channel=None,
 ):
     """Construct a PassiveEngineCoreProc by hand, bypassing the heavy
     `vllm.v1.engine.core` import (which transitively pulls torch +
@@ -131,8 +132,9 @@ def _make_proc(
         proc.executor = executor
         proc.passive_scheduler = scheduler
         proc._idle_sleep_seconds = 0.001
+        proc._pp_pd_channel = pp_pd_channel
     except Exception:
-        proc = _LocalPassiveEngineCoreProc(cfg, executor, scheduler)
+        proc = _LocalPassiveEngineCoreProc(cfg, executor, scheduler, pp_pd_channel=pp_pd_channel)
 
     return proc, sub, executor
 
@@ -143,11 +145,27 @@ class _LocalPassiveEngineCoreProc:
     Must stay in sync with the production implementation.
     """
 
-    def __init__(self, cfg, executor, scheduler) -> None:
+    def __init__(self, cfg, executor, scheduler, pp_pd_channel=None) -> None:
         self.vllm_config = cfg
         self.executor = executor
         self.passive_scheduler = scheduler
         self._idle_sleep_seconds = 0.001
+        self._pp_pd_channel = pp_pd_channel
+
+    def _maybe_publish_post_out(self, scheduler_output) -> None:
+        if self._pp_pd_channel is None:
+            return
+        from dataclasses import replace
+        bt = scheduler_output.batch_type
+        if bt == BatchType.PREFILL_FIRST:
+            tail = replace(scheduler_output, batch_type=BatchType.PREFILL_LAST)
+        elif bt == BatchType.DECODE_FIRST:
+            tail = replace(scheduler_output, batch_type=BatchType.DECODE_LAST)
+        elif bt == BatchType.EMPTY:
+            tail = scheduler_output
+        else:
+            return
+        self._pp_pd_channel.publish(tail)
 
     def step(self) -> bool:
         self.passive_scheduler.poll_and_classify()
@@ -156,6 +174,7 @@ class _LocalPassiveEngineCoreProc:
             batch = self.passive_scheduler.schedule()
             if batch.is_empty():
                 break
+            self._maybe_publish_post_out(batch.scheduler_output)
             for slice_info in batch.slices:
                 payload = (
                     (batch.scheduler_output, slice_info)
@@ -261,3 +280,144 @@ def test_step_empties_first_then_one_phase_batch():
     assert proc.step() is True
     types = [item[1][0].batch_type for item in executor.rpc_broadcast_mq.enqueued]
     assert types == [BatchType.EMPTY, BatchType.EMPTY, BatchType.PURE_DECODE]
+
+
+# ---------------------------------------------------------------------- #
+# POST_OUT publishing (cloud → edge, PD-separation)                      #
+# ---------------------------------------------------------------------- #
+class FakePdChannel:
+    """Captures publish() calls for assertion. Also records the global
+    ordering against an external "events" log so tests can verify that
+    POST_OUT publish happens BEFORE executor enqueue.
+    """
+
+    def __init__(self, events_log: list | None = None) -> None:
+        self.published: list = []
+        self._events_log = events_log
+
+    def publish(self, scheduler_output) -> None:
+        self.published.append(scheduler_output)
+        if self._events_log is not None:
+            self._events_log.append(("publish", scheduler_output.batch_type))
+
+    def shutdown(self) -> None:
+        pass
+
+
+class OrderingRpcMq:
+    """RpcMq that records every enqueue into a shared events log."""
+
+    def __init__(self, events_log: list) -> None:
+        self.enqueued: list = []
+        self._events_log = events_log
+
+    def enqueue(self, item: tuple) -> None:
+        self.enqueued.append(item)
+        bt = item[1][0].batch_type
+        self._events_log.append(("enqueue", bt))
+
+
+def test_post_out_not_published_when_channel_is_none():
+    proc, sub, executor = _make_proc(pp_pd_channel=None)
+    sub.feed(_make_so(BatchType.PREFILL_FIRST))
+    assert proc.step() is True
+    assert proc._pp_pd_channel is None
+    # No exception; executor enqueue happened normally.
+    assert len(executor.rpc_broadcast_mq.enqueued) == 1
+
+
+def test_post_out_publishes_prefill_first_as_prefill_last():
+    channel = FakePdChannel()
+    proc, sub, executor = _make_proc(pp_pd_channel=channel)
+    sub.feed(_make_so(BatchType.PREFILL_FIRST))
+    assert proc.step() is True
+    assert len(channel.published) == 1
+    tail = channel.published[0]
+    assert tail.batch_type == BatchType.PREFILL_LAST
+    # Local executor still sees the original head-segment batch_type.
+    enqueued_so = executor.rpc_broadcast_mq.enqueued[0][1][0]
+    assert enqueued_so.batch_type == BatchType.PREFILL_FIRST
+
+
+def test_post_out_publishes_decode_first_as_decode_last():
+    channel = FakePdChannel()
+    proc, sub, executor = _make_proc(pp_pd_channel=channel)
+    sub.feed(_make_so(BatchType.DECODE_FIRST))
+    assert proc.step() is True
+    assert len(channel.published) == 1
+    assert channel.published[0].batch_type == BatchType.DECODE_LAST
+    enqueued_so = executor.rpc_broadcast_mq.enqueued[0][1][0]
+    assert enqueued_so.batch_type == BatchType.DECODE_FIRST
+
+
+def test_post_out_publishes_empty_as_is():
+    channel = FakePdChannel()
+    proc, sub, executor = _make_proc(pp_pd_channel=channel)
+    sub.feed(_make_so(BatchType.EMPTY))
+    assert proc.step() is True
+    assert len(channel.published) == 1
+    assert channel.published[0].batch_type == BatchType.EMPTY
+
+
+def test_post_out_does_not_publish_pure_prefill_or_pure_decode():
+    """Legacy non-edge-cloud PP batches (PURE_PREFILL / PURE_DECODE / PD_MIX)
+    must NOT trigger POST_OUT publish — they have no edge tail segment.
+    """
+    channel = FakePdChannel()
+    proc, sub, executor = _make_proc(pp_pd_channel=channel)
+    sub.feed(
+        _make_so(BatchType.PURE_PREFILL),
+        _make_so(BatchType.PURE_DECODE),
+        _make_so(BatchType.PD_MIX),
+    )
+    # Two step() calls drain all three (PURE_PREFILL first, then PD_MIX or
+    # PURE_DECODE — order depends on policy, doesn't matter for this test).
+    while proc.step():
+        pass
+    assert channel.published == []
+    # All three batches were still locally enqueued.
+    assert len(executor.rpc_broadcast_mq.enqueued) == 3
+
+
+def test_post_out_publish_happens_before_executor_enqueue():
+    """Strict ordering: POST_OUT publish must precede executor enqueue per
+    batch, so the edge's scheduling signal arrives ASAP.
+    """
+    events_log: list = []
+    channel = FakePdChannel(events_log=events_log)
+    proc, sub, _executor = _make_proc(pp_pd_channel=channel)
+    # Replace the rpc_broadcast_mq with one that also records into the log.
+    proc.executor.rpc_broadcast_mq = OrderingRpcMq(events_log)
+
+    sub.feed(
+        _make_so(BatchType.PREFILL_FIRST),
+        _make_so(BatchType.EMPTY),
+    )
+    assert proc.step() is True
+
+    # Expect: publish(EMPTY), enqueue(EMPTY), publish(PREFILL_FIRST→LAST), enqueue(PREFILL_FIRST)
+    # The actual phase order is policy-dependent; what we verify is the
+    # local invariant: for each batch, publish precedes enqueue.
+    publish_indices = [i for i, e in enumerate(events_log) if e[0] == "publish"]
+    enqueue_indices = [i for i, e in enumerate(events_log) if e[0] == "enqueue"]
+    # We expect at least one publish + enqueue for each of: EMPTY, PREFILL_FIRST.
+    assert len(publish_indices) >= 2
+    assert len(enqueue_indices) >= 2
+
+    # For each batch_type, the first publish must come before the first enqueue.
+    for bt in (BatchType.EMPTY, BatchType.PREFILL_LAST):
+        # PREFILL_LAST is the rewritten form of PREFILL_FIRST in publish events.
+        pubs = [i for i, e in enumerate(events_log)
+                if e[0] == "publish" and e[1] == bt]
+        # corresponding enqueue event uses the head-segment type.
+        head_bt = {
+            BatchType.EMPTY: BatchType.EMPTY,
+            BatchType.PREFILL_LAST: BatchType.PREFILL_FIRST,
+        }[bt]
+        enqs = [i for i, e in enumerate(events_log)
+                if e[0] == "enqueue" and e[1] == head_bt]
+        assert pubs and enqs
+        assert pubs[0] < enqs[0], (
+            f"publish({bt}) at {pubs[0]} must precede "
+            f"enqueue({head_bt}) at {enqs[0]}; log={events_log}"
+        )

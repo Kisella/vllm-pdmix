@@ -274,6 +274,78 @@ class PPSchedulerZmqSubscriber:
             pass
 
 
+class PPSchedulerZmqChannel:
+    """Bidirectional ZMQ channel for SchedulerOutput exchange between two
+    PP engines.
+
+    A `PPSchedulerZmqChannel` owns one send side (a `PPSchedulerZmqPublisher`)
+    and one receive side (a `PPSchedulerZmqSubscriber`), each backed by its
+    own dedicated ZMQ PUSH / PULL socket on independent endpoints. It is the
+    symmetric primitive needed by the edge-cloud PD-separation flow:
+
+    - Edge constructs one channel with::
+
+          send_endpoint = "tcp://*:<PRE_OUT_PORT>"          # bind, edge → cloud
+          recv_endpoint = "tcp://<cloud_addr>:<POST_OUT_PORT>"   # connect
+
+      and uses ``publish()`` to forward PREFILL_FIRST / DECODE_FIRST / EMPTY
+      batches, and ``consume_new_outputs()`` to drain PREFILL_LAST /
+      DECODE_LAST batches returned from the cloud.
+
+    - Cloud constructs the mirror channel with::
+
+          send_endpoint = "tcp://*:<POST_OUT_PORT>"          # bind, cloud → edge
+          recv_endpoint = "tcp://<master_addr>:<PRE_OUT_PORT>"   # connect
+
+      The same publish/consume API drives the opposite traffic direction.
+
+    Both endpoints use the same PUSH/PULL + background-thread + queue.Queue
+    bridge as the legacy unidirectional classes, so no scheduler-thread time
+    is spent on pickling or socket I/O.
+
+    Channel naming (``name``) is purely diagnostic; it is included in the
+    log lines emitted by the underlying publisher / subscriber so the two
+    edge-cloud channels can be told apart in a single combined log.
+    """
+
+    def __init__(
+        self,
+        send_endpoint: str,
+        recv_endpoint: str,
+        name: str = "pp-channel",
+    ) -> None:
+        self._name = name
+        self._send_endpoint = send_endpoint
+        self._recv_endpoint = recv_endpoint
+        # Publisher binds-if-wildcard / connects-otherwise (see existing
+        # `PPSchedulerZmqPublisher.__init__`); subscriber always connects.
+        # The endpoints chosen by the caller therefore fully determine the
+        # bind/connect roles of each side.
+        self._publisher = PPSchedulerZmqPublisher(send_endpoint)
+        self._subscriber = PPSchedulerZmqSubscriber(recv_endpoint)
+        logger.info(
+            "PPSchedulerZmqChannel[%s] up: send=%s, recv=%s",
+            name,
+            send_endpoint,
+            recv_endpoint,
+        )
+
+    def publish(self, scheduler_output: SchedulerOutput) -> None:
+        """Queue a SchedulerOutput for the peer. Non-blocking."""
+        self._publisher.publish(scheduler_output)
+
+    def consume_new_outputs(self) -> list[tuple[int, SchedulerOutput]]:
+        """Return and clear all (seq, SchedulerOutput) pairs received since
+        the last call. Suitable for use as the ``pp_subscriber`` argument
+        of `PassiveScheduler`, which only relies on this method.
+        """
+        return self._subscriber.consume_new_outputs()
+
+    def shutdown(self) -> None:
+        self._publisher.shutdown()
+        self._subscriber.shutdown()
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -427,6 +499,29 @@ class EngineCore:
             self._pp_scheduler_zmq_publisher = PPSchedulerZmqPublisher(
                 envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
             )
+
+        # Set up edge-cloud PD-separation bidirectional ZMQ channel.
+        # The edge (rank 0) uses this to publish PREFILL_FIRST / DECODE_FIRST
+        # to PRE_OUT and consume PREFILL_LAST / DECODE_LAST from POST_OUT.
+        self._pp_pd_channel: PPSchedulerZmqChannel | None = None
+        if vllm_config.parallel_config.enable_pd_separation:
+            parallel_config = vllm_config.parallel_config
+            if parallel_config.is_edge_node:
+                # Edge: bind PRE_OUT, connect POST_OUT via cloud_addr.
+                cloud_addr = parallel_config.cloud_addr or "127.0.0.1"
+                pre_out = f"tcp://*:{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
+                post_out = (
+                    f"tcp://{cloud_addr}:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
+                )
+                self._pp_pd_channel = PPSchedulerZmqChannel(
+                    send_endpoint=pre_out,
+                    recv_endpoint=post_out,
+                    name="pd-edge",
+                )
+                logger.info(
+                    "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s",
+                    pre_out, post_out,
+                )
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -642,11 +737,24 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        # Drain POST_OUT (cloud → edge) into the PDSeparatedScheduler's
+        # tail-segment ready queues before scheduling. Doing this here keeps
+        # the cloud-return-path scheduling signal as fresh as possible for
+        # the upcoming `schedule()` call, where PREFILL_LAST takes priority.
+        self._drain_pd_channel_inbox()
+
         scheduler_output = self.scheduler.schedule()
 
         # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
         if self._pp_scheduler_zmq_publisher is not None:
             self._pp_scheduler_zmq_publisher.publish(scheduler_output)
+
+        # Forward head-segment batches on the PRE_OUT (edge → cloud) channel.
+        # Tail-segment batches (PREFILL_LAST / DECODE_LAST) must NOT be
+        # republished — they are edge-only sampling work derived from the
+        # cloud's own return payload.
+        self._maybe_publish_pre_out(scheduler_output)
 
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -677,6 +785,80 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
+    # ------------------------------------------------------------------ #
+    # Edge-cloud PD-separation channel helpers                            #
+    # ------------------------------------------------------------------ #
+    # The two helpers below are no-ops unless `enable_pd_separation` is on
+    # AND this engine is the edge node (so `self._pp_pd_channel` is set).
+    # They are factored out of `step()` / `step_with_batch_queue()` so both
+    # execution paths share identical hand-off semantics with the cloud.
+    def _drain_pd_channel_inbox(self) -> None:
+        """Move cloud-returned SchedulerOutputs into the local PDSeparated
+        scheduler's ``prefills_last_ready`` / ``decodes_last_ready`` queues.
+
+        Tail-segment batches arrive on POST_OUT with their ``batch_type``
+        already rewritten by the cloud (PREFILL_LAST / DECODE_LAST); we just
+        sort them into the right ready queue. Anything else logged loudly
+        and dropped — it should never reach here.
+        """
+        if self._pp_pd_channel is None:
+            return
+        # Defer the import to avoid a hard module-level coupling — `EngineCore`
+        # may be running with a different scheduler when PD-separation is off.
+        from vllm.v1.core.sched.output import BatchType
+        from vllm.v1.core.sched.pd_separated_scheduler import (
+            PDSeparatedScheduler,
+        )
+        if not isinstance(self.scheduler, PDSeparatedScheduler):
+            return
+        new_outputs = self._pp_pd_channel.consume_new_outputs()
+        for _seq, so in new_outputs:
+            bt = so.batch_type
+            print(f"Received scheduler_output from cloud, batch_type: {bt}",flush=True)
+            if bt == BatchType.PREFILL_LAST:
+                self.scheduler.prefills_last_ready.append(so)
+            elif bt == BatchType.DECODE_LAST:
+                self.scheduler.decodes_last_ready.append(so)
+            else:
+                logger.error(
+                    "PD-separation POST_OUT received unexpected batch_type="
+                    "%s; expected PREFILL_LAST or DECODE_LAST. Dropping.",
+                    bt.value if bt is not None else "<none>",
+                )
+
+    def _maybe_publish_pre_out(self, scheduler_output: SchedulerOutput) -> None:
+        """Forward head-segment batches on the edge → cloud channel.
+
+        Only PREFILL_FIRST / DECODE_FIRST / EMPTY are forwarded:
+        - PREFILL_FIRST / DECODE_FIRST need the cloud to execute the middle
+          layers and publish a corresponding tail-segment back on POST_OUT.
+        - EMPTY carries sync info (finished_req_ids) that the cloud needs to
+          stay aligned even when no real tokens are scheduled.
+        - PREFILL_LAST / DECODE_LAST are edge-only and must never be sent.
+        """
+        if self._pp_pd_channel is None:
+            return
+        from vllm.v1.core.sched.output import BatchType
+        bt = scheduler_output.batch_type
+        if bt in (
+            BatchType.PREFILL_FIRST,
+            BatchType.DECODE_FIRST,
+            BatchType.EMPTY,
+        ):
+            self._pp_pd_channel.publish(scheduler_output)
+        elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
+            # No-op by design — kept explicit so future refactors don't
+            # accidentally start publishing the sampler-side batches.
+            return
+        else:
+            # Legacy mixed-mode batches (PD_MIX / PURE_*) only show up here
+            # if PD-separation is enabled but the scheduler emitted a non-
+            # separated batch. Log once-per-class and continue.
+            logger.debug(
+                "PD-separation PRE_OUT skipping non-separated batch_type=%s",
+                bt.value if bt is not None else "<none>",
+            )
+
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -705,11 +887,19 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
+            # Same edge-cloud PD-separation hook as `step()`: pull cloud-
+            # returned tail-segment batches into the scheduler queues before
+            # picking the next batch.
+            self._drain_pd_channel_inbox()
+
             scheduler_output = self.scheduler.schedule()
 
             # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
             if self._pp_scheduler_zmq_publisher is not None:
                 self._pp_scheduler_zmq_publisher.publish(scheduler_output)
+
+            # Forward head-segment batches on PRE_OUT (edge → cloud).
+            self._maybe_publish_pre_out(scheduler_output)
 
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -815,6 +1005,9 @@ class EngineCore:
         if self._pp_scheduler_zmq_publisher is not None:
             self._pp_scheduler_zmq_publisher.shutdown()
             self._pp_scheduler_zmq_publisher = None
+        if self._pp_pd_channel is not None:
+            self._pp_pd_channel.shutdown()
+            self._pp_pd_channel = None
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -2450,6 +2643,7 @@ class PassiveEngineCoreProc:
         executor,  # MultiprocExecutor — duck-typed to avoid heavy import
         pp_subscriber: "PPSchedulerZmqSubscriber",
         dispatch_policy: "DispatchPolicy | None" = None,
+        pp_pd_channel: "PPSchedulerZmqChannel | None" = None,
     ) -> None:
         from vllm.v1.core.sched.passive_scheduler import (
             DispatchPolicy,
@@ -2462,11 +2656,15 @@ class PassiveEngineCoreProc:
         self.passive_scheduler = PassiveScheduler(
             vllm_config, pp_subscriber, dispatch_policy=dispatch_policy
         )
+        # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
+        # side in PD-separation mode; left None for the legacy PP path.
+        self._pp_pd_channel = pp_pd_channel
         if vllm_config.parallel_config.enable_edge_cloud:
             logger.info(
                 "PassiveEngineCore: edge-cloud mode enabled "
-                "(enable_pd_separation=%s)",
+                "(enable_pd_separation=%s, pd_channel=%s)",
                 vllm_config.parallel_config.enable_pd_separation,
+                "on" if pp_pd_channel is not None else "off",
             )
         self._idle_sleep_seconds = 0.001
 
@@ -2489,6 +2687,14 @@ class PassiveEngineCoreProc:
             batch = self.passive_scheduler.schedule()
             if batch.is_empty():
                 break
+            # PD-separation: on the cloud side, publish the rewritten
+            # tail-segment SchedulerOutput on POST_OUT BEFORE the executor
+            # gets the head-segment work. Ordering matters: edge sees the
+            # scheduling signal as early as possible (cheap ZMQ message),
+            # then the hidden-state data signal follows via the PP comm
+            # group naturally once segment_c on the cloud completes.
+            self._maybe_publish_post_out(batch.scheduler_output)
+
             for slice_info in batch.slices:
                 payload = (
                     (batch.scheduler_output, slice_info)
@@ -2505,6 +2711,37 @@ class PassiveEngineCoreProc:
             if batch.scheduler_output.batch_type != BatchType.EMPTY:
                 break
         return dispatched
+
+    def _maybe_publish_post_out(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Rewrite + publish a head-segment batch as a tail-segment one
+        on the POST_OUT (cloud → edge) channel.
+
+        Mapping (cloud-side):
+            PREFILL_FIRST → PREFILL_LAST
+            DECODE_FIRST  → DECODE_LAST
+            EMPTY         → forwarded as-is (sync signal)
+            anything else → dropped (legacy PP batches don't trigger return)
+
+        Uses a shallow copy via :py:func:`dataclasses.replace` so the original
+        SchedulerOutput (still about to be enqueued for the local executor)
+        keeps its head-segment ``batch_type``.
+        """
+        if self._pp_pd_channel is None:
+            return
+        from dataclasses import replace
+        from vllm.v1.core.sched.output import BatchType
+        bt = scheduler_output.batch_type
+        if bt == BatchType.PREFILL_FIRST:
+            tail = replace(scheduler_output, batch_type=BatchType.PREFILL_LAST)
+        elif bt == BatchType.DECODE_FIRST:
+            tail = replace(scheduler_output, batch_type=BatchType.DECODE_LAST)
+        elif bt == BatchType.EMPTY:
+            tail = scheduler_output  # no rewrite needed
+        else:
+            return
+        self._pp_pd_channel.publish(tail)
 
     def run_busy_loop(self) -> None:
         """Drive `step()` until the executor reports failure or shutdown."""
@@ -2548,6 +2785,11 @@ class PassiveEngineCoreProc:
                 envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
             )
 
+        # Cloud-side PD-separation channel is constructed inside the try
+        # block below (depends on `vllm_config`); declared here so the
+        # `finally` clean-up can reference it unconditionally.
+        pp_pd_channel: PPSchedulerZmqChannel | None = None
+
         shutdown_requested = False
 
         def signal_handler(signum, frame):
@@ -2581,9 +2823,33 @@ class PassiveEngineCoreProc:
                     )
                     policy = DispatchPolicy.PREFILL_FIRST
 
+                # Set up edge-cloud PD-separation channel (cloud side).
+                # The cloud binds POST_OUT and connects PRE_OUT via
+                # master_addr (the edge's IP) so PRE_OUT connects back.
+                if vllm_config.parallel_config.enable_pd_separation:
+                    master_addr = vllm_config.parallel_config.master_addr
+                    post_out_bind = (
+                        f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
+                    )
+                    pre_out_connect = (
+                        f"tcp://{master_addr}:"
+                        f"{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
+                    )
+                    pp_pd_channel = PPSchedulerZmqChannel(
+                        send_endpoint=post_out_bind,
+                        recv_endpoint=pre_out_connect,
+                        name="pd-cloud",
+                    )
+                    logger.info(
+                        "PD-separation cloud channel: POST_OUT=%s, "
+                        "PRE_OUT=%s",
+                        post_out_bind, pre_out_connect,
+                    )
+
                 proc = PassiveEngineCoreProc(
                     vllm_config, executor, pp_subscriber,
                     dispatch_policy=policy,
+                    pp_pd_channel=pp_pd_channel,
                 )
                 proc.run_busy_loop()
             else:
@@ -2604,5 +2870,7 @@ class PassiveEngineCoreProc:
                 ready_pipe.close()
             if pp_subscriber is not None:
                 pp_subscriber.shutdown()
+            if pp_pd_channel is not None:
+                pp_pd_channel.shutdown()
             if executor is not None:
                 executor.shutdown()

@@ -35,17 +35,32 @@ class BatchType(enum.Enum):
     PassiveScheduler can route the batch without re-inspecting per-request
     state.
 
-    - PD_MIX:       prefill and decode requests in the same batch (default
-                    for the legacy mixed scheduler)
-    - PURE_PREFILL: every scheduled request is in its prefill phase
-    - PURE_DECODE:  every scheduled request is in its decode phase
-    - EMPTY:        no tokens scheduled this step (sync-only batch, e.g.
-                    propagating finished_req_ids)
+    - PD_MIX:        prefill and decode requests in the same batch (default
+                     for the legacy mixed scheduler)
+    - PURE_PREFILL:  every scheduled request is in its prefill phase
+                     (legacy PP / PDmix mode)
+    - PURE_DECODE:   every scheduled request is in its decode phase
+                     (legacy PP / PDmix mode)
+    - EMPTY:         no tokens scheduled this step (sync-only batch, e.g.
+                     propagating finished_req_ids)
+    - PREFILL_FIRST: edge-cloud PD separation — prefill batch executing the
+                     edge head segment (segment_a)
+    - PREFILL_LAST:  edge-cloud PD separation — prefill batch executing the
+                     edge tail segment (segment_e + sampler)
+    - DECODE_FIRST:  edge-cloud PD separation — decode batch executing the
+                     edge head segment (Phase 4)
+    - DECODE_LAST:   edge-cloud PD separation — decode batch executing the
+                     edge tail segment (Phase 4)
     """
     PD_MIX = "pd_mix"
     PURE_PREFILL = "pure_prefill"
     PURE_DECODE = "pure_decode"
     EMPTY = "empty"
+
+    PREFILL_FIRST = "prefill_first"
+    PREFILL_LAST = "prefill_last"
+    DECODE_FIRST = "decode_first"
+    DECODE_LAST = "decode_last"
 
 
 @dataclass
