@@ -56,11 +56,27 @@ class PDSeparatedScheduler(Scheduler):
 
         self._step_counter: int = 0
 
+        # In-flight prefill limit (head-segment batches).
+        self.prefill_inflight_limit: int = getattr(
+            self.scheduler_config, "pd_prefill_inflight_limit", 1
+        )
+        self.prefill_inflight_count: int = 0
+
     def schedule(self) -> SchedulerOutput:
         return self._schedule_pd_separated()
 
     def _schedule_pd_separated(self) -> SchedulerOutput:
         phase = self._select_scheduling_phase()
+        # Enforce prefill inflight limit: if a new PREFILL_FIRST would exceed
+        # the limit, fall back to decode or emit an empty batch.
+        if (
+            phase == SchedulingPhase.PREFILL_FIRST
+            and self.prefill_inflight_count >= self.prefill_inflight_limit
+        ):
+            if self.running:
+                phase = SchedulingPhase.DECODE
+            else:
+                return SchedulerOutput.make_empty()
         self._step_counter += 1
         print(
             f"\r\n[PD] Step{self._step_counter}, phase is {phase.value},    "
@@ -68,7 +84,8 @@ class PDSeparatedScheduler(Scheduler):
             f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
             f"running[]: {len(self.running)}, "
             f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
-            f"decodes_last_ready[]: {len(self.decodes_last_ready)}"
+            f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
+            f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}"
         )
         for req in self.chunk_prefill_first:
             print(
@@ -152,6 +169,7 @@ class PDSeparatedScheduler(Scheduler):
                     scheduler_output.batch_type = BatchType.EMPTY
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
+                    self.prefill_inflight_count += 1
                 new_chunk_prefill_first = [
                     req for req in self.running if req.is_prefill_chunk
                 ]
@@ -166,7 +184,8 @@ class PDSeparatedScheduler(Scheduler):
                 print(
                     f"[PD] _pick_prefill_first_batch done: "
                     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
-                    f"running[]: {len(self.running)}"
+                    f"running[]: {len(self.running)}, "
+                    f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}"
                 )
                 for (
                     req_id,
@@ -332,6 +351,13 @@ class PDSeparatedScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, Any]:
+        if scheduler_output.batch_type == BatchType.PREFILL_LAST:
+            if self.prefill_inflight_count > 0:
+                self.prefill_inflight_count -= 1
+            print(
+                f"[PD] update_from_output PREFILL_LAST done, "
+                f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}"
+            )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [
             req for req in self.chunk_prefill_first if not req.is_finished()
