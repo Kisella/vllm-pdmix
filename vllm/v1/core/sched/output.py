@@ -283,6 +283,13 @@ class SchedulerOutput:
     # PDSeparatedScheduler overrides it to PURE_PREFILL / PURE_DECODE / EMPTY.
     batch_type: BatchType = BatchType.PD_MIX
 
+    # Head-token for edge-cloud PD-separation pairing.
+    # EngineCore assigns a UUID on PF/DF, cloud PassiveEngineCore echoes it
+    # back on PL/DL via POST_OUT, and the edge worker embeds it into the
+    # intermediate tensors payload so control-plane / data-plane alignment
+    # can be verified before running the tail segment.
+    head_token: str | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

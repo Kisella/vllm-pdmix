@@ -859,6 +859,21 @@ class EngineCore:
                 bt.value if bt is not None else "<none>",
             )
 
+    def _needs_sample_tokens(
+        self, scheduler_output: SchedulerOutput
+    ) -> bool:
+        """Return True if sample_tokens should follow execute_model for this batch.
+
+        In edge-cloud PD-separation mode, only tail-segment batches (PL/DL)
+        produce logits and need sampling. Head-segment batches (PF/DF) output
+        intermediate hidden states and must skip sampling.
+        """
+        if self._pp_pd_channel is None:
+            return True
+        from vllm.v1.core.sched.output import BatchType
+        bt = scheduler_output.batch_type
+        return bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST)
+
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -894,6 +909,18 @@ class EngineCore:
 
             scheduler_output = self.scheduler.schedule()
 
+            # Assign head-token for edge-cloud head-segment batches so the
+            # tail-segment can be matched to the correct suspended state.
+            from vllm.v1.core.sched.output import BatchType
+            if (
+                self._pp_pd_channel is not None
+                and scheduler_output.batch_type in (
+                    BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
+                )
+            ):
+                from uuid import uuid4
+                scheduler_output.head_token = uuid4().hex
+
             # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
             if self._pp_scheduler_zmq_publisher is not None:
                 self._pp_scheduler_zmq_publisher.publish(scheduler_output)
@@ -910,6 +937,11 @@ class EngineCore:
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
+                future = cast(Future[ModelRunnerOutput], exec_future)
+            elif not self._needs_sample_tokens(scheduler_output):
+                # Edge-cloud head segment (PF/DF): sampling is done in the
+                # tail segment (PL/DL) after the cloud returns intermediate
+                # tensors. Skip sample_tokens for the head segment.
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 if not scheduler_output.pending_structured_output_tokens:
@@ -2741,6 +2773,8 @@ class PassiveEngineCoreProc:
             tail = scheduler_output  # no rewrite needed
         else:
             return
+        # Echo the head_token back so the edge can correlate the tail
+        # segment with its suspended head state.
         self._pp_pd_channel.publish(tail)
 
     def run_busy_loop(self) -> None:
