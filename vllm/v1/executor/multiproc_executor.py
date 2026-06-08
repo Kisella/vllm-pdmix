@@ -1149,6 +1149,7 @@ class WorkerProc:
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
 
+
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
         # Check if parallel groups are initialized first
