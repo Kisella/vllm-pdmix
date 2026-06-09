@@ -50,6 +50,7 @@ _install_fake_distributed_utils()
 
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput  # noqa: E402
 from vllm.v1.core.sched.passive_scheduler import (  # noqa: E402
+    CloudSchedulingState,
     DispatchPolicy,
     LayerSliceInfo,
     PassiveScheduler,
@@ -359,6 +360,55 @@ def test_empty_dropped_before_phase_queues():
     batches = _drain_schedule(scheduler)
     types = [b.scheduler_output.batch_type for b in batches]
     assert types == [BatchType.PURE_DECODE]
+
+
+def test_expect_alternation_prefill_then_decode():
+    scheduler, sub = _make_scheduler(
+        dispatch_policy=DispatchPolicy.EXPECT_ALTERNATION
+    )
+    sub.feed(_make_so(BatchType.PREFILL_FIRST), _make_so(BatchType.DECODE_FIRST))
+    scheduler.poll_and_classify()
+
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+    assert scheduler.cloud_scheduling_state == (
+        CloudSchedulingState.EXPECT_EXECUTE_DECODE
+    )
+
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.DECODE_FIRST
+    assert scheduler.cloud_scheduling_state == (
+        CloudSchedulingState.EXPECT_EXECUTE_PREFILL
+    )
+
+
+def test_expect_alternation_prefill_fallback_decode_keeps_state():
+    scheduler, sub = _make_scheduler(
+        dispatch_policy=DispatchPolicy.EXPECT_ALTERNATION
+    )
+    sub.feed(_make_so(BatchType.DECODE_FIRST))
+    scheduler.poll_and_classify()
+
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.DECODE_FIRST
+    assert scheduler.cloud_scheduling_state == (
+        CloudSchedulingState.EXPECT_EXECUTE_PREFILL
+    )
+
+
+def test_expect_alternation_decode_fallback_prefill_keeps_state():
+    scheduler, sub = _make_scheduler(
+        dispatch_policy=DispatchPolicy.EXPECT_ALTERNATION
+    )
+    scheduler.cloud_scheduling_state = CloudSchedulingState.EXPECT_EXECUTE_DECODE
+    sub.feed(_make_so(BatchType.PREFILL_FIRST))
+    scheduler.poll_and_classify()
+
+    batch = scheduler.schedule()
+    assert batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+    assert scheduler.cloud_scheduling_state == (
+        CloudSchedulingState.EXPECT_EXECUTE_DECODE
+    )
 
 
 def test_schedule_picks_one_at_a_time():

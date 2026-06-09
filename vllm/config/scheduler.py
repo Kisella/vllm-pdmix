@@ -164,7 +164,7 @@ class SchedulerConfig:
     - "decode_first": prioritize decode requests over prefill requests.
     - "strict_alternation": strictly alternate between prefill and decode steps."""
 
-    pd_prefill_inflight_limit: int = 1
+    pd_prefill_inflight_limit: int = Field(default=1, ge=1)
     """Maximum number of prefill head-segment (PREFILL_FIRST) batches that
     can be in flight at the same time.  When the limit is reached the
     scheduler will fall back to decode or emit an empty batch until a

@@ -100,7 +100,7 @@ def _make_so(batch_type: BatchType) -> SchedulerOutput:
 
 def _make_proc(
     *,
-    dispatch_policy: DispatchPolicy = DispatchPolicy.PREFILL_FIRST,
+    dispatch_policy: DispatchPolicy = DispatchPolicy.EXPECT_ALTERNATION,
     layer_slice_size: int = 0,
     num_hidden_layers: int = 8,
     pp_size: int = 2,
@@ -167,25 +167,20 @@ class _LocalPassiveEngineCoreProc:
 
     def step(self) -> bool:
         self.passive_scheduler.poll_and_classify()
-        dispatched = False
-        while True:
-            batch = self.passive_scheduler.schedule()
-            if batch.is_empty():
-                break
-            self._maybe_publish_post_out(batch.scheduler_output)
-            for slice_info in batch.slices:
-                payload = (
-                    (batch.scheduler_output, slice_info)
-                    if slice_info is not None
-                    else (batch.scheduler_output,)
-                )
-                self.executor.rpc_broadcast_mq.enqueue(
-                    (b"pp_scheduler_output", payload, {}, None)
-                )
-            dispatched = True
-            if batch.scheduler_output.batch_type != BatchType.EMPTY:
-                break
-        return dispatched
+        batch = self.passive_scheduler.schedule()
+        if batch.is_empty():
+            return False
+        self._maybe_publish_post_out(batch.scheduler_output)
+        for slice_info in batch.slices:
+            payload = (
+                (batch.scheduler_output, slice_info)
+                if slice_info is not None
+                else (batch.scheduler_output,)
+            )
+            self.executor.rpc_broadcast_mq.enqueue(
+                (b"pp_scheduler_output", payload, {}, None)
+            )
+        return True
 
 
 # ---------------------------------------------------------------------- #

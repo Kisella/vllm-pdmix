@@ -20,11 +20,14 @@ from vllm.v1.request import Request, RequestStatus
 logger = init_logger(__name__)
 
 
-class SchedulingPhase(enum.Enum):
-    PREFILL_FIRST = "prefill_first"
-    PREFILL_LAST = "prefill_last"
-    DECODE = "decode"
-    EMPTY = "empty"
+class PrefillState(enum.Enum):
+    """Edge-side prefill in-flight state machine.
+
+    See Phase5 design in ``PDbatch分离边云协同Phase5&7详细设计.md``.
+    """
+    IDLE = "idle"       # prefill_inflight_count == 0
+    LOW = "low"         # prefill_inflight_count == 1
+    HIGH = "high"       # prefill_inflight_count >= prefill_inflight_limit
 
 
 class PDSeparatedScheduler(Scheduler):
@@ -74,37 +77,69 @@ class PDSeparatedScheduler(Scheduler):
         return self._schedule_pd_separated()
 
     def _schedule_pd_separated(self) -> SchedulerOutput:
-        phase = self._select_scheduling_phase()
-        # Enforce prefill inflight limit: if a new PREFILL_FIRST would exceed
-        # the limit, fall back to decode or emit an empty batch.
+        state = self._prefill_state()
+        self._log_scheduler_state(state)
+
+        if state == PrefillState.IDLE:
+            # IDLE: P首/chunk0首 > D首 > D尾 > Empty.
+            if self._has_prefill_work():
+                return self._pick_prefill_first_batch()
+            if self._can_schedule_decode_first():
+                return self._pick_decode_first_batch()
+            if self.decodes_last_ready:
+                return self._pick_decode_last_batch()
+            return SchedulerOutput.make_empty()
+
+        if state == PrefillState.LOW:
+            # LOW: chunk/P首(when slot available) > P尾 > D首 > D尾 > Empty.
+            if self._can_schedule_prefill_first():
+                return self._pick_prefill_first_batch()
+            if self.prefills_last_ready:
+                return self._pick_prefill_last_batch()
+            if self._can_schedule_decode_first():
+                return self._pick_decode_first_batch()
+            if self.decodes_last_ready:
+                return self._pick_decode_last_batch()
+            return SchedulerOutput.make_empty()
+
+        # HIGH: P尾 > D首 > D尾 > Empty. New P首 is forbidden.
+        if self.prefills_last_ready:
+            return self._pick_prefill_last_batch()
+        if self._can_schedule_decode_first():
+            return self._pick_decode_first_batch()
+        if self.decodes_last_ready:
+            return self._pick_decode_last_batch()
+        return SchedulerOutput.make_empty()
+
+    def _prefill_state(self) -> PrefillState:
+        if self.prefill_inflight_count <= 0:
+            return PrefillState.IDLE
         if (
-            phase == SchedulingPhase.PREFILL_FIRST
+            self.prefill_inflight_limit > 1
             and self.prefill_inflight_count >= self.prefill_inflight_limit
         ):
-            if self.decodes_last_ready or (
-                self.running
-                and self.decode_inflight_count < self.decode_inflight_limit
-            ):
-                phase = SchedulingPhase.DECODE
-            else:
-                return SchedulerOutput.make_empty()
-        if (
-            phase == SchedulingPhase.DECODE
-            and not self.decodes_last_ready
-            and self.decode_inflight_count >= self.decode_inflight_limit
-        ):
-            if (
-                (self.chunk_prefill_first or self.waiting)
-                and self.prefill_inflight_count < self.prefill_inflight_limit
-            ):
-                phase = SchedulingPhase.PREFILL_FIRST
-            else:
-                return SchedulerOutput.make_empty()
-        if phase == SchedulingPhase.EMPTY:
-            return SchedulerOutput.make_empty()
+            return PrefillState.HIGH
+        return PrefillState.LOW
+
+    def _has_prefill_work(self) -> bool:
+        return bool(self.chunk_prefill_first or self.waiting)
+
+    def _can_schedule_prefill_first(self) -> bool:
+        return (
+            self._has_prefill_work()
+            and self.prefill_inflight_count < self.prefill_inflight_limit
+        )
+
+    def _can_schedule_decode_first(self) -> bool:
+        return bool(
+            self.running
+            and self.decode_inflight_count < self.decode_inflight_limit
+        )
+
+    def _log_scheduler_state(self, state: PrefillState) -> None:
         self._step_counter += 1
         print(
-            f"\r\n[PD] Step{self._step_counter}, phase is {phase.value},    "
+            f"\r\n[PD] Step{self._step_counter}, state is {state.value},    "
             f"waiting[]: {len(self.waiting)}, "
             f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
             f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
@@ -130,60 +165,6 @@ class PDSeparatedScheduler(Scheduler):
                 f"num_computed_tokens: {req.num_computed_tokens}, "
                 f"chunk_num: {req.chunk_num}"
             )
-        if phase == SchedulingPhase.PREFILL_LAST:
-            return self._pick_prefill_last_batch()
-        if phase == SchedulingPhase.PREFILL_FIRST:
-            if not self.chunk_prefill_first and not self.waiting:
-                print(
-                    "[PD] prefill_first phase but no prefill work, "
-                    "auto-switch to decode"
-                )
-                if not self.running:
-                    return SchedulerOutput.make_empty()
-                return self._pick_decode_first_batch()
-            return self._pick_prefill_first_batch()
-        # SchedulingPhase.DECODE
-        if self.decodes_last_ready:
-            return self._pick_decode_last_batch()
-        if not self.running:
-            print(
-                "[PD] decode phase but no decode work, "
-                "auto-switch to prefill_first"
-            )
-            if self.prefill_inflight_count >= self.prefill_inflight_limit:
-                return SchedulerOutput.make_empty()
-            return self._pick_prefill_first_batch()
-        return self._pick_decode_first_batch()
-
-    def _select_scheduling_phase(self) -> SchedulingPhase:
-        # Phase 3: PREFILL_LAST always wins when there is cloud-returned work.
-        # Releasing edge KV early by sampling first keeps backpressure low.
-        if self.prefills_last_ready:
-            return SchedulingPhase.PREFILL_LAST
-        if self.decodes_last_ready:
-            return SchedulingPhase.DECODE
-
-        policy = self.scheduler_config.pd_scheduling_policy
-        if policy == "prefill_first":
-            if self.chunk_prefill_first or self.waiting:
-                return SchedulingPhase.PREFILL_FIRST
-            if self.running:
-                return SchedulingPhase.DECODE
-            return SchedulingPhase.EMPTY
-        elif policy == "decode_first":
-            if self.running:
-                return SchedulingPhase.DECODE
-            if self.chunk_prefill_first or self.waiting:
-                return SchedulingPhase.PREFILL_FIRST
-            return SchedulingPhase.EMPTY
-        elif policy == "strict_alternation":
-            return (
-                SchedulingPhase.PREFILL_FIRST
-                if self._step_counter % 2 == 0
-                else SchedulingPhase.DECODE
-            )
-        else:
-            raise ValueError(f"Unknown PD scheduling policy: {policy}")
 
     def _pick_prefill_first_batch(self) -> SchedulerOutput:
         saved_running = self.running

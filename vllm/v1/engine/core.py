@@ -1690,8 +1690,21 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            # In edge-cloud mode the edge can be completely idle for long
+            # periods while waiting for the next client request.  If no local
+            # work exists, force a blocking wait even if an earlier mode (for
+            # example elastic scaling) left the input queue in non-blocking
+            # polling mode; otherwise the outer busy loop spins forever.
+            if (
+                not block
+                and not self.scheduler.has_unfinished_requests()
+                and not self.engines_running
+                and not bool(self.batch_queue)
+                and getattr(self, "eep_scaling_state", None) is None
+            ):
+                block = True
             try:
-                if self.input_queue.empty():
+                if block and self.input_queue.empty():
                     print("input_queue is empty, EngineCore waiting for work.", flush=True)
                 req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
@@ -2696,7 +2709,7 @@ class PassiveEngineCoreProc:
             PassiveScheduler,
         )
         if dispatch_policy is None:
-            dispatch_policy = DispatchPolicy.PREFILL_FIRST
+            dispatch_policy = DispatchPolicy.EXPECT_ALTERNATION
         self.vllm_config = vllm_config
         self.executor = executor
         self.passive_scheduler = PassiveScheduler(
@@ -2724,38 +2737,30 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
-        from vllm.v1.core.sched.output import BatchType
-
         self.passive_scheduler.poll_and_classify()
-        dispatched = False
-        while True:
-            batch = self.passive_scheduler.schedule()
-            if batch.is_empty():
-                break
-            # PD-separation: on the cloud side, publish the rewritten
-            # tail-segment SchedulerOutput on POST_OUT BEFORE the executor
-            # gets the head-segment work. Ordering matters: edge sees the
-            # scheduling signal as early as possible (cheap ZMQ message),
-            # then the hidden-state data signal follows via the PP comm
-            # group naturally once segment_c on the cloud completes.
-            self._maybe_publish_post_out(batch.scheduler_output)
+        batch = self.passive_scheduler.schedule()
+        if batch.is_empty():
+            return False
 
-            for slice_info in batch.slices:
-                payload = (
-                    (batch.scheduler_output, slice_info)
-                    if slice_info is not None
-                    else (batch.scheduler_output,)
-                )
-                self.executor.rpc_broadcast_mq.enqueue(
-                    (b"pp_scheduler_output", payload, {}, None)
-                )
-            dispatched = True
-            # EMPTY can arrive in bursts; keep draining. All other phases
-            # are throttled to one batch per step, matching the previous
-            # `PassiveScheduler.step()` behavior.
-            if batch.scheduler_output.batch_type != BatchType.EMPTY:
-                break
-        return dispatched
+        for slice_info in batch.slices:
+            # PD-separation: on the cloud side, publish the rewritten
+            # tail-segment SchedulerOutput on POST_OUT only when the dispatched
+            # work can produce the final middle-segment hidden state.  With
+            # slice-aware scheduling, early prefill slices must not wake the
+            # edge tail segment because doing so can block the edge on a recv
+            # and prevent it from issuing decode head work between P slices.
+            if slice_info is None or slice_info.is_last_slice:
+                self._maybe_publish_post_out(batch.scheduler_output)
+
+            payload = (
+                (batch.scheduler_output, slice_info)
+                if slice_info is not None
+                else (batch.scheduler_output,)
+            )
+            self.executor.rpc_broadcast_mq.enqueue(
+                (b"pp_scheduler_output", payload, {}, None)
+            )
+        return True
 
     def _maybe_publish_post_out(
         self, scheduler_output: SchedulerOutput
@@ -2862,10 +2867,10 @@ class PassiveEngineCoreProc:
                 except ValueError:
                     logger.warning(
                         "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
-                        "falling back to prefill_first.",
+                        "falling back to expect_alternation.",
                         envs.VLLM_PP_PASSIVE_DISPATCH_POLICY,
                     )
-                    policy = DispatchPolicy.PREFILL_FIRST
+                    policy = DispatchPolicy.EXPECT_ALTERNATION
 
                 # Set up edge-cloud PD-separation channel (cloud side).
                 # The cloud binds POST_OUT and connects PRE_OUT via

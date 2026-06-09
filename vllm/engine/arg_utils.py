@@ -598,6 +598,7 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     pd_scheduling_policy: str = SchedulerConfig.pd_scheduling_policy
+    pd_prefill_inflight_limit: int = SchedulerConfig.pd_prefill_inflight_limit
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -1403,6 +1404,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--pd-scheduling-policy", **scheduler_kwargs["pd_scheduling_policy"]
         )
+        scheduler_group.add_argument(
+            "--pd-prefill-inflight-limit",
+            **scheduler_kwargs["pd_prefill_inflight_limit"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -2014,6 +2019,7 @@ class EngineArgs:
             stream_interval=self.stream_interval,
             enable_pd_separation=self.enable_pd_separation,
             pd_scheduling_policy=self.pd_scheduling_policy,
+            pd_prefill_inflight_limit=self.pd_prefill_inflight_limit,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
