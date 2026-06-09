@@ -161,8 +161,6 @@ class _LocalPassiveEngineCoreProc:
             tail = replace(scheduler_output, batch_type=BatchType.PREFILL_LAST)
         elif bt == BatchType.DECODE_FIRST:
             tail = replace(scheduler_output, batch_type=BatchType.DECODE_LAST)
-        elif bt == BatchType.EMPTY:
-            tail = scheduler_output
         else:
             return
         self._pp_pd_channel.publish(tail)
@@ -231,20 +229,15 @@ def test_step_enqueues_pure_prefill_as_n_slice_payloads():
     assert payloads[0][0] is payloads[1][0]
 
 
-def test_step_drains_all_empties_in_one_call():
+def test_step_drops_all_empties():
     proc, sub, executor = _make_proc()
     sub.feed(
         _make_so(BatchType.EMPTY),
         _make_so(BatchType.EMPTY),
         _make_so(BatchType.EMPTY),
     )
-    assert proc.step() is True
-    # All three EMPTY batches should have been enqueued in a single step.
-    assert len(executor.rpc_broadcast_mq.enqueued) == 3
-    for item in executor.rpc_broadcast_mq.enqueued:
-        payload = item[1]
-        assert len(payload) == 1
-        assert payload[0].batch_type == BatchType.EMPTY
+    assert proc.step() is False
+    assert executor.rpc_broadcast_mq.enqueued == []
 
 
 def test_step_throttles_non_empty_phases_to_one_per_call():
@@ -267,10 +260,7 @@ def test_step_throttles_non_empty_phases_to_one_per_call():
     assert proc.step() is False
 
 
-def test_step_empties_first_then_one_phase_batch():
-    """A mix of EMPTY + PURE_DECODE: all EMPTYs drained, then exactly one
-    PURE_DECODE dispatched, all within a single step().
-    """
+def test_step_drops_empties_then_dispatches_one_phase_batch():
     proc, sub, executor = _make_proc()
     sub.feed(
         _make_so(BatchType.PURE_DECODE),
@@ -279,7 +269,7 @@ def test_step_empties_first_then_one_phase_batch():
     )
     assert proc.step() is True
     types = [item[1][0].batch_type for item in executor.rpc_broadcast_mq.enqueued]
-    assert types == [BatchType.EMPTY, BatchType.EMPTY, BatchType.PURE_DECODE]
+    assert types == [BatchType.PURE_DECODE]
 
 
 # ---------------------------------------------------------------------- #
@@ -350,13 +340,13 @@ def test_post_out_publishes_decode_first_as_decode_last():
     assert enqueued_so.batch_type == BatchType.DECODE_FIRST
 
 
-def test_post_out_publishes_empty_as_is():
+def test_post_out_does_not_publish_empty():
     channel = FakePdChannel()
     proc, sub, executor = _make_proc(pp_pd_channel=channel)
     sub.feed(_make_so(BatchType.EMPTY))
-    assert proc.step() is True
-    assert len(channel.published) == 1
-    assert channel.published[0].batch_type == BatchType.EMPTY
+    assert proc.step() is False
+    assert channel.published == []
+    assert executor.rpc_broadcast_mq.enqueued == []
 
 
 def test_post_out_does_not_publish_pure_prefill_or_pure_decode():
@@ -395,29 +385,23 @@ def test_post_out_publish_happens_before_executor_enqueue():
     )
     assert proc.step() is True
 
-    # Expect: publish(EMPTY), enqueue(EMPTY), publish(PREFILL_FIRST→LAST), enqueue(PREFILL_FIRST)
-    # The actual phase order is policy-dependent; what we verify is the
-    # local invariant: for each batch, publish precedes enqueue.
+    # EMPTY is dropped. PREFILL_FIRST is published as PREFILL_LAST before
+    # being enqueued locally.
     publish_indices = [i for i, e in enumerate(events_log) if e[0] == "publish"]
     enqueue_indices = [i for i, e in enumerate(events_log) if e[0] == "enqueue"]
-    # We expect at least one publish + enqueue for each of: EMPTY, PREFILL_FIRST.
-    assert len(publish_indices) >= 2
-    assert len(enqueue_indices) >= 2
+    assert len(publish_indices) == 1
+    assert len(enqueue_indices) == 1
 
-    # For each batch_type, the first publish must come before the first enqueue.
-    for bt in (BatchType.EMPTY, BatchType.PREFILL_LAST):
-        # PREFILL_LAST is the rewritten form of PREFILL_FIRST in publish events.
-        pubs = [i for i, e in enumerate(events_log)
-                if e[0] == "publish" and e[1] == bt]
-        # corresponding enqueue event uses the head-segment type.
-        head_bt = {
-            BatchType.EMPTY: BatchType.EMPTY,
-            BatchType.PREFILL_LAST: BatchType.PREFILL_FIRST,
-        }[bt]
-        enqs = [i for i, e in enumerate(events_log)
-                if e[0] == "enqueue" and e[1] == head_bt]
-        assert pubs and enqs
-        assert pubs[0] < enqs[0], (
-            f"publish({bt}) at {pubs[0]} must precede "
-            f"enqueue({head_bt}) at {enqs[0]}; log={events_log}"
-        )
+    empty_pubs = [i for i, e in enumerate(events_log)
+                  if e[0] == "publish" and e[1] == BatchType.EMPTY]
+    assert empty_pubs == []
+
+    pubs = [i for i, e in enumerate(events_log)
+            if e[0] == "publish" and e[1] == BatchType.PREFILL_LAST]
+    enqs = [i for i, e in enumerate(events_log)
+            if e[0] == "enqueue" and e[1] == BatchType.PREFILL_FIRST]
+    assert pubs and enqs
+    assert pubs[0] < enqs[0], (
+        f"publish({BatchType.PREFILL_LAST}) at {pubs[0]} must precede "
+        f"enqueue({BatchType.PREFILL_FIRST}) at {enqs[0]}; log={events_log}"
+    )

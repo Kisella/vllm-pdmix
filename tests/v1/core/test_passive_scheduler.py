@@ -151,7 +151,7 @@ def test_classify_routes_by_batch_type():
     assert len(scheduler.ready_prefills) == 1
     assert len(scheduler.ready_pdmixes) == 1
     assert len(scheduler.ready_decodes) == 1
-    assert len(scheduler.ready_empties) == 1
+    assert scheduler.num_pending == 3
 
 
 def test_classify_unknown_falls_into_pdmix():
@@ -220,13 +220,12 @@ def test_pure_decode_never_sliced():
     assert batch.slices == [None]
 
 
-def test_empty_never_sliced():
+def test_empty_is_dropped():
     scheduler, sub = _make_scheduler(layer_slice_size=2, num_hidden_layers=8)
     sub.feed(_make_so(BatchType.EMPTY))
     scheduler.poll_and_classify()
-    batch = scheduler.schedule()
-    assert batch.scheduler_output.batch_type == BatchType.EMPTY
-    assert batch.slices == [None]
+    assert scheduler.num_pending == 0
+    assert scheduler.schedule().is_empty()
 
 
 def test_decode_first_never_sliced():
@@ -349,7 +348,7 @@ def test_dispatch_policy_order(policy, expected_order):
     assert [b.scheduler_output.batch_type for b in batches] == expected_order
 
 
-def test_empty_drained_before_phase_queues_regardless_of_policy():
+def test_empty_dropped_before_phase_queues():
     scheduler, sub = _make_scheduler(dispatch_policy=DispatchPolicy.DECODE_FIRST)
     sub.feed(
         _make_so(BatchType.PURE_DECODE),
@@ -359,7 +358,7 @@ def test_empty_drained_before_phase_queues_regardless_of_policy():
     scheduler.poll_and_classify()
     batches = _drain_schedule(scheduler)
     types = [b.scheduler_output.batch_type for b in batches]
-    assert types == [BatchType.EMPTY, BatchType.EMPTY, BatchType.PURE_DECODE]
+    assert types == [BatchType.PURE_DECODE]
 
 
 def test_schedule_picks_one_at_a_time():
@@ -393,11 +392,10 @@ def test_has_pending_and_num_pending():
 
     sub.feed(
         _make_so(BatchType.PURE_PREFILL),
-        _make_so(BatchType.EMPTY),
     )
     scheduler.poll_and_classify()
     assert scheduler.has_pending() is True
-    assert scheduler.num_pending == 2
+    assert scheduler.num_pending == 1
 
 
 # ---------------------------------------------------------------------- #

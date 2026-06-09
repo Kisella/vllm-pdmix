@@ -32,12 +32,11 @@ logger = init_logger(__name__)
 
 
 class DispatchPolicy(enum.Enum):
-    """Order in which phase queues are drained inside :meth:`PassiveScheduler.step`.
+    """Order in which phase queues are drained inside :meth:`PassiveScheduler.schedule`.
 
-    EMPTY batches are always drained first (cheap sync messages, must not be
-    starved). After that, the three phase queues — PURE_PREFILL, PD_MIX,
-    PURE_DECODE — are polled in the order encoded by the policy. One
-    SchedulerOutput is picked per non-empty queue per call.
+    The three phase queues — PURE_PREFILL, PD_MIX, PURE_DECODE — are polled
+    in the order encoded by the policy. One SchedulerOutput is picked per
+    non-empty queue per call.
     """
     PREFILL_FIRST = "prefill_first"   # P  → PD-mix → D
     DECODE_FIRST = "decode_first"     # D  → PD-mix → P
@@ -66,8 +65,8 @@ class ScheduledBatch:
     """Output of `PassiveScheduler.schedule()`: one SchedulerOutput plus the
     plan for how to slice it across layer ranges.
 
-    - For PURE_DECODE / DECODE_FIRST / EMPTY batches, or when slicing is
-      disabled: ``slices == [None]`` (single full-layer execution).
+    - For PURE_DECODE / DECODE_FIRST batches, or when slicing is disabled:
+      ``slices == [None]`` (single full-layer execution).
     - For PURE_PREFILL / PREFILL_FIRST / PD_MIX batches with slicing enabled:
       ``slices == [LayerSliceInfo(0), ..., LayerSliceInfo(N-1)]``.
 
@@ -98,7 +97,7 @@ class PassiveScheduler:
 
     `schedule()` returns a `ScheduledBatch` with 1 SchedulerOutput plus
     the slice plan; a single PURE_PREFILL / PD_MIX batch may carry N
-    layer slices, while PURE_DECODE / EMPTY batches always carry
+    layer slices, while PURE_DECODE / DECODE_FIRST batches always carry
     `[None]` (single full-layer execution).
     """
 
@@ -112,12 +111,9 @@ class PassiveScheduler:
         self.pp_subscriber = pp_subscriber
         self.dispatch_policy = dispatch_policy
 
-        # Per-phase ready queues. EMPTY batches get their own queue so they
-        # never block higher-priority P/D work and can be drained in bulk.
         self.ready_prefills: deque[SchedulerOutput] = deque()
         self.ready_pdmixes: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
-        self.ready_empties: deque[SchedulerOutput] = deque()
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -209,14 +205,19 @@ class PassiveScheduler:
             self._drain_subscriber_inline()
 
         while True:
+            is_runnning = len(self.ready_prefills) + len(self.ready_pdmixes) \
+                + len(self.ready_decodes) > 0
             try:
                 scheduler_output = self._inbox.get_nowait()
             except queue.Empty:
-                break
+                if is_runnning:
+                    break
+                print("poll_and_classify: inbox is empty", flush=True)
+                scheduler_output = self._inbox.get(block=True)
             bt = scheduler_output.batch_type
-            print(f"Received scheduler_output from edge, batch_type: {bt}",flush=True)
+            print(f"Received scheduler_output from edge, batch_type: {bt}", flush=True)
             if bt == BatchType.EMPTY:
-                self.ready_empties.append(scheduler_output)
+                continue
             elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
                 # PREFILL_FIRST = edge-cloud "P first" head segment; from the
                 # cloud's perspective it is exactly the same workload as a
@@ -240,12 +241,11 @@ class PassiveScheduler:
                 self.ready_pdmixes.append(scheduler_output)
             logger.debug(
                 "PassiveScheduler classified batch_type=%s "
-                "(prefills=%d, pdmixes=%d, decodes=%d, empties=%d)",
+                "(prefills=%d, pdmixes=%d, decodes=%d)",
                 bt.value if bt is not None else "<none>",
                 len(self.ready_prefills),
                 len(self.ready_pdmixes),
                 len(self.ready_decodes),
-                len(self.ready_empties),
             )
 
     def _drain_subscriber_inline(self) -> None:
@@ -280,7 +280,6 @@ class PassiveScheduler:
         if so.batch_type in (
             BatchType.PURE_DECODE,
             BatchType.DECODE_FIRST,
-            BatchType.EMPTY,
         ):
             return [None]
         # Slicing disabled or trivially 1 slice.
@@ -308,19 +307,12 @@ class PassiveScheduler:
         """Pick the next SchedulerOutput to dispatch, with its slice plan.
 
         Policy:
-          1. EMPTY batches go first (cheap sync messages, never starved).
-          2. Otherwise scan the three phase queues in the order encoded by
+          1. Scan the three phase queues in the order encoded by
              ``self.dispatch_policy`` and pop from the first non-empty one.
-          3. If all queues are empty, return :py:meth:`ScheduledBatch.empty`.
+          2. If all queues are empty, return :py:meth:`ScheduledBatch.empty`.
 
-        Per call this picks **one** SchedulerOutput. Callers that want to
-        drain multiple EMPTY batches per tick should loop until
-        ``ScheduledBatch.is_empty()`` and treat EMPTY specially.
+        Per call this picks **one** SchedulerOutput.
         """
-        if self.ready_empties:
-            so = self.ready_empties.popleft()
-            return self._build_batch(so)
-
         for queue_name in self._POLICY_ORDER[self.dispatch_policy]:
             q: deque[SchedulerOutput] = getattr(self, queue_name)
             if q:
@@ -332,14 +324,13 @@ class PassiveScheduler:
         batch = ScheduledBatch(scheduler_output=so, slices=self._slice_for(so))
         logger.debug(
             "PassiveScheduler.schedule[%s] picked batch_type=%s slices=%d; "
-            "pending=(prefills=%d, pdmixes=%d, decodes=%d, empties=%d)",
+            "pending=(prefills=%d, pdmixes=%d, decodes=%d)",
             self.dispatch_policy.value,
             so.batch_type.value if so.batch_type is not None else "<none>",
             len(batch.slices),
             len(self.ready_prefills),
             len(self.ready_pdmixes),
             len(self.ready_decodes),
-            len(self.ready_empties),
         )
         return batch
 
@@ -351,7 +342,6 @@ class PassiveScheduler:
             self.ready_prefills
             or self.ready_pdmixes
             or self.ready_decodes
-            or self.ready_empties
         )
 
     @property
@@ -360,5 +350,4 @@ class PassiveScheduler:
             len(self.ready_prefills)
             + len(self.ready_pdmixes)
             + len(self.ready_decodes)
-            + len(self.ready_empties)
         )

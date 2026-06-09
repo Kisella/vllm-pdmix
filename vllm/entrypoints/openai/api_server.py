@@ -67,8 +67,9 @@ from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
 import debugpy
-debugpy.listen(("0.0.0.0", 8009))
-print("Debugpy is listening on port 8008, wait_for_client")
+port = 8009
+debugpy.listen(("0.0.0.0", port))
+print(f"Debugpy is listening on port {port}, wait_for_client")
 debugpy.wait_for_client()
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory

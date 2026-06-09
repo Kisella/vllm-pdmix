@@ -302,6 +302,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            batch_type=BatchType.EMPTY,
         )
 
 

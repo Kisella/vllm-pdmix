@@ -134,7 +134,8 @@ class PPSchedulerZmqPublisher:
         """Queue a SchedulerOutput for publishing. Non-blocking: drops the
         message if the bridge queue is full (back-pressure protection).
         """
-        if not self._running:
+        from vllm.v1.core.sched.output import BatchType
+        if not self._running or scheduler_output.batch_type is BatchType.EMPTY:
             return
         try:
             seq = self._seq
@@ -224,6 +225,9 @@ class PPSchedulerZmqSubscriber:
                 seq_bytes, data = self._pull.recv_multipart()
                 seq = int.from_bytes(seq_bytes, "big")
                 scheduler_output = pickle.loads(data)
+                from vllm.v1.core.sched.output import BatchType
+                if scheduler_output.batch_type is BatchType.EMPTY:
+                    continue
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
                 logger.info(
@@ -288,7 +292,7 @@ class PPSchedulerZmqChannel:
           send_endpoint = "tcp://*:<PRE_OUT_PORT>"          # bind, edge → cloud
           recv_endpoint = "tcp://<cloud_addr>:<POST_OUT_PORT>"   # connect
 
-      and uses ``publish()`` to forward PREFILL_FIRST / DECODE_FIRST / EMPTY
+      and uses ``publish()`` to forward PREFILL_FIRST / DECODE_FIRST
       batches, and ``consume_new_outputs()`` to drain PREFILL_LAST /
       DECODE_LAST batches returned from the cloud.
 
@@ -747,7 +751,12 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule()
 
         # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
-        if self._pp_scheduler_zmq_publisher is not None:
+        from vllm.v1.core.sched.output import BatchType
+        bt = scheduler_output.batch_type
+        if (
+            self._pp_scheduler_zmq_publisher is not None
+            and bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST)
+        ):
             self._pp_scheduler_zmq_publisher.publish(scheduler_output)
 
         # Forward head-segment batches on the PRE_OUT (edge → cloud) channel.
@@ -829,11 +838,10 @@ class EngineCore:
     def _maybe_publish_pre_out(self, scheduler_output: SchedulerOutput) -> None:
         """Forward head-segment batches on the edge → cloud channel.
 
-        Only PREFILL_FIRST / DECODE_FIRST / EMPTY are forwarded:
+        Only PREFILL_FIRST / DECODE_FIRST are forwarded:
         - PREFILL_FIRST / DECODE_FIRST need the cloud to execute the middle
           layers and publish a corresponding tail-segment back on POST_OUT.
-        - EMPTY carries sync info (finished_req_ids) that the cloud needs to
-          stay aligned even when no real tokens are scheduled.
+        - EMPTY is edge-local and must not wake the cloud.
         - PREFILL_LAST / DECODE_LAST are edge-only and must never be sent.
         """
         if self._pp_pd_channel is None:
@@ -843,17 +851,15 @@ class EngineCore:
         if bt in (
             BatchType.PREFILL_FIRST,
             BatchType.DECODE_FIRST,
-            BatchType.EMPTY,
         ):
             self._pp_pd_channel.publish(scheduler_output)
-        elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
-            # No-op by design — kept explicit so future refactors don't
-            # accidentally start publishing the sampler-side batches.
+        elif bt in (
+            BatchType.EMPTY,
+            BatchType.PREFILL_LAST,
+            BatchType.DECODE_LAST,
+        ):
             return
         else:
-            # Legacy mixed-mode batches (PD_MIX / PURE_*) only show up here
-            # if PD-separation is enabled but the scheduler emitted a non-
-            # separated batch. Log once-per-class and continue.
             logger.debug(
                 "PD-separation PRE_OUT skipping non-separated batch_type=%s",
                 bt.value if bt is not None else "<none>",
@@ -922,7 +928,13 @@ class EngineCore:
                 scheduler_output.head_token = uuid4().hex
 
             # Publish SchedulerOutput to pp rank1 if ZMQ is configured.
-            if self._pp_scheduler_zmq_publisher is not None:
+            if (
+                self._pp_scheduler_zmq_publisher is not None
+                and scheduler_output.batch_type in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.DECODE_FIRST,
+                )
+            ):
                 self._pp_scheduler_zmq_publisher.publish(scheduler_output)
 
             # Forward head-segment batches on PRE_OUT (edge → cloud).
@@ -1679,6 +1691,8 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
+                if self.input_queue.empty():
+                    print("input_queue is empty, EngineCore waiting for work.", flush=True)
                 req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
@@ -2703,9 +2717,8 @@ class PassiveEngineCoreProc:
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
 
-        Drains EMPTY batches in one go (cheap sync messages) and takes
-        at most one batch from each non-empty phase queue per call, in
-        the order encoded by the configured dispatch policy.
+        Batches are dispatched one phase at a time in the order encoded by
+        the configured dispatch policy.
 
         Returns:
             True if at least one payload was enqueued, False if the
@@ -2753,7 +2766,6 @@ class PassiveEngineCoreProc:
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
             DECODE_FIRST  → DECODE_LAST
-            EMPTY         → forwarded as-is (sync signal)
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -2769,8 +2781,6 @@ class PassiveEngineCoreProc:
             tail = replace(scheduler_output, batch_type=BatchType.PREFILL_LAST)
         elif bt == BatchType.DECODE_FIRST:
             tail = replace(scheduler_output, batch_type=BatchType.DECODE_LAST)
-        elif bt == BatchType.EMPTY:
-            tail = scheduler_output  # no rewrite needed
         else:
             return
         # Echo the head_token back so the edge can correlate the tail
