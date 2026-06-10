@@ -923,6 +923,7 @@ class EngineCore:
                 and scheduler_output.batch_type in (
                     BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
                 )
+                and not scheduler_output.head_token
             ):
                 from uuid import uuid4
                 scheduler_output.head_token = uuid4().hex

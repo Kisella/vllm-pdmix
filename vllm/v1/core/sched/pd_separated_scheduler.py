@@ -5,11 +5,12 @@ import time
 from collections import deque
 from collections.abc import Iterable
 from typing import Any
+from uuid import uuid4
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import BatchType, SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
 from vllm.v1.core.sched.request_queue import create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
@@ -28,6 +29,76 @@ class PrefillState(enum.Enum):
     IDLE = "idle"       # prefill_inflight_count == 0
     LOW = "low"         # prefill_inflight_count == 1
     HIGH = "high"       # prefill_inflight_count >= prefill_inflight_limit
+
+
+class HiddenChannelManager:
+    """Manages data-plane hidden tensor channels for edge-cloud PD separation.
+
+    Two prefill channels (PREFILL_1 / PREFILL_2) support 2P1D; one decode
+    channel (DECODE) supports single in-flight decode. Channels are allocated
+    in FIFO order and freed when the tail segment completes.
+    """
+
+    def __init__(self) -> None:
+        self._free_prefills: deque[HiddenChannelType] = deque([
+            HiddenChannelType.PREFILL_1,
+            HiddenChannelType.PREFILL_2,
+        ])
+        # Mapping from head_token to the allocated channel.  Only prefill
+        # batches are recorded here; decode batches always use DECODE and
+        # do not need a mapping.
+        self._head_token_to_channel: dict[str, HiddenChannelType] = {}
+
+    # ------------------------------------------------------------------ #
+    # Prefill channel allocation / release                               #
+    # ------------------------------------------------------------------ #
+    def allocate_prefill(self, head_token: str) -> HiddenChannelType:
+        """Allocate a free prefill channel for the batch identified by
+        ``head_token``. Raises if none available."""
+        if not self._free_prefills:
+            raise RuntimeError(
+                "No free prefill hidden channel available"
+            )
+        channel = self._free_prefills.popleft()
+        self._head_token_to_channel[head_token] = channel
+        print(
+            f"[PD-CHAN] allocate prefill channel={channel.value} "
+            f"head_token={head_token}"
+        )
+        return channel
+
+    def release_prefill(self, head_token: str) -> HiddenChannelType | None:
+        """Release the prefill channel previously allocated for
+        ``head_token``. Returns the freed channel (or None if not found)."""
+        channel = self._head_token_to_channel.pop(head_token, None)
+        if channel is None:
+            return None
+        self._free_prefills.append(channel)
+        print(
+            f"[PD-CHAN] release prefill channel={channel.value} "
+            f"head_token={head_token}"
+        )
+        return channel
+
+    def has_free_prefill(self) -> bool:
+        return bool(self._free_prefills)
+
+    # ------------------------------------------------------------------ #
+    # Decode channel (always DECODE, no free-list)                        #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def decode_channel() -> HiddenChannelType:
+        return HiddenChannelType.DECODE
+
+    # ------------------------------------------------------------------ #
+    # Introspection                                                      #
+    # ------------------------------------------------------------------ #
+    def get_channel(self, head_token: str) -> HiddenChannelType | None:
+        return self._head_token_to_channel.get(head_token)
+
+    @property
+    def in_use_prefills(self) -> list[HiddenChannelType]:
+        return list(self._head_token_to_channel.values())
 
 
 class PDSeparatedScheduler(Scheduler):
@@ -68,6 +139,10 @@ class PDSeparatedScheduler(Scheduler):
         self.decode_inflight_limit: int = 1
         self.decode_inflight_count: int = 0
 
+        # Phase6 data-plane channel manager.  Two prefill hidden channels are
+        # available for 2P1D; decode uses a dedicated fixed channel.
+        self.hidden_channel_manager = HiddenChannelManager()
+
         # Buffer queue: requests whose P-first segment is done but P-last
         # segment has not yet returned from the cloud.  Not eligible for
         # decode scheduling until PL completes and they are moved to running.
@@ -76,19 +151,34 @@ class PDSeparatedScheduler(Scheduler):
     def schedule(self) -> SchedulerOutput:
         return self._schedule_pd_separated()
 
+    def _make_empty_batch(self) -> SchedulerOutput:
+        scheduler_output = SchedulerOutput.make_empty()
+        scheduler_output.finished_req_ids = self.finished_req_ids
+        self.finished_req_ids = set()
+        return scheduler_output
+
     def _schedule_pd_separated(self) -> SchedulerOutput:
         state = self._prefill_state()
-        self._log_scheduler_state(state)
+        scheduler_output = self._pick_by_state(state)
+        has_work = scheduler_output.total_num_scheduled_tokens > 0
+        is_tail = scheduler_output.batch_type in (
+            BatchType.PREFILL_LAST,
+            BatchType.DECODE_LAST,
+        )
+        if has_work or is_tail:
+            self._log_scheduler_state(state)
+        return scheduler_output
 
+    def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
         if state == PrefillState.IDLE:
             # IDLE: P首/chunk0首 > D首 > D尾 > Empty.
-            if self._has_prefill_work():
+            if self._can_schedule_prefill_first():
                 return self._pick_prefill_first_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
             if self.decodes_last_ready:
                 return self._pick_decode_last_batch()
-            return SchedulerOutput.make_empty()
+            return self._make_empty_batch()
 
         if state == PrefillState.LOW:
             # LOW: chunk/P首(when slot available) > P尾 > D首 > D尾 > Empty.
@@ -100,7 +190,7 @@ class PDSeparatedScheduler(Scheduler):
                 return self._pick_decode_first_batch()
             if self.decodes_last_ready:
                 return self._pick_decode_last_batch()
-            return SchedulerOutput.make_empty()
+            return self._make_empty_batch()
 
         # HIGH: P尾 > D首 > D尾 > Empty. New P首 is forbidden.
         if self.prefills_last_ready:
@@ -109,7 +199,22 @@ class PDSeparatedScheduler(Scheduler):
             return self._pick_decode_first_batch()
         if self.decodes_last_ready:
             return self._pick_decode_last_batch()
-        return SchedulerOutput.make_empty()
+        return self._make_empty_batch()
+
+    def is_waiting_for_remote_tail(self) -> bool:
+        """True when local requests exist only as remote in-flight work.
+
+        In this state the edge has no local batch to execute until POST_OUT
+        returns a PREFILL_LAST/DECODE_LAST, so the EngineCore should yield
+        instead of tight-loop scheduling EMPTY batches.
+        """
+        return bool(
+            (self.prefill_inflight_count > 0 or self.decode_inflight_count > 0)
+            and not self.prefills_last_ready
+            and not self.decodes_last_ready
+            and not self._can_schedule_prefill_first()
+            and not self._can_schedule_decode_first()
+        )
 
     def _prefill_state(self) -> PrefillState:
         if self.prefill_inflight_count <= 0:
@@ -128,6 +233,7 @@ class PDSeparatedScheduler(Scheduler):
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
+            and self.hidden_channel_manager.has_free_prefill()
         )
 
     def _can_schedule_decode_first(self) -> bool:
@@ -185,6 +291,12 @@ class PDSeparatedScheduler(Scheduler):
                     scheduler_output.batch_type = BatchType.EMPTY
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
+                    scheduler_output.head_token = uuid4().hex
+                    scheduler_output.hidden_channel = (
+                        self.hidden_channel_manager.allocate_prefill(
+                            scheduler_output.head_token
+                        )
+                    )
                     self.prefill_inflight_count += 1
                 new_chunk_prefill_first = [
                     req for req in self.running if req.is_prefill_chunk
@@ -236,7 +348,7 @@ class PDSeparatedScheduler(Scheduler):
         ``update_from_output`` does not double-account them.
         """
         if not self.prefills_last_ready:
-            return SchedulerOutput.make_empty()
+            return self._make_empty_batch()
         so = self.prefills_last_ready.popleft()
         assert so.batch_type == BatchType.PREFILL_LAST, (
             f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
@@ -249,20 +361,46 @@ class PDSeparatedScheduler(Scheduler):
                 req for req in self.chunk_prefill_first
                 if req.request_id not in last_req_ids
             ]
+        self._validate_prefill_tail_channel(so)
         print(
             f"[PD] _pick_prefill_last_batch popped {len(last_req_ids)} reqs; "
             f"remaining prefills_last_ready[]: {len(self.prefills_last_ready)}, "
-            f"prefill_last_pending[]: {len(self.prefill_last_pending)}"
+            f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
+            f"hidden_channel: {so.hidden_channel}"
         )
         return so
 
+    def _validate_prefill_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
+        token = scheduler_output.head_token
+        channel = scheduler_output.hidden_channel
+        if not token:
+            raise RuntimeError("PREFILL_LAST missing head_token")
+        if channel not in (HiddenChannelType.PREFILL_1, HiddenChannelType.PREFILL_2):
+            raise RuntimeError(
+                f"PREFILL_LAST expects a prefill hidden channel, got {channel}"
+            )
+        expected = self.hidden_channel_manager.get_channel(token)
+        if expected != channel:
+            raise RuntimeError(
+                f"PREFILL_LAST hidden channel mismatch: expected {expected}, "
+                f"got {channel}, head_token={token}"
+            )
+
+    def _validate_decode_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
+        if scheduler_output.hidden_channel != HiddenChannelType.DECODE:
+            raise RuntimeError(
+                "DECODE_LAST expects decode hidden channel, got "
+                f"{scheduler_output.hidden_channel}"
+            )
+
     def _pick_decode_last_batch(self) -> SchedulerOutput:
         if not self.decodes_last_ready:
-            return SchedulerOutput.make_empty()
+            return self._make_empty_batch()
         so = self.decodes_last_ready.popleft()
         assert so.batch_type == BatchType.DECODE_LAST, (
             f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         )
+        self._validate_decode_tail_channel(so)
         print(
             f"[PD] _pick_decode_last_batch popped "
             f"{len(so.num_scheduled_tokens)} reqs; "
@@ -308,7 +446,7 @@ class PDSeparatedScheduler(Scheduler):
 
     def _pick_decode_first_batch(self) -> SchedulerOutput:
         if not self.running:
-            return SchedulerOutput.make_empty()
+            return self._make_empty_batch()
 
         saved_chunk_prefill_first = self.chunk_prefill_first
         saved_waiting = self.waiting
@@ -327,6 +465,10 @@ class PDSeparatedScheduler(Scheduler):
                     scheduler_output.batch_type = BatchType.EMPTY
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
+                    scheduler_output.head_token = uuid4().hex
+                    scheduler_output.hidden_channel = (
+                        self.hidden_channel_manager.decode_channel()
+                    )
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_inflight_count += 1
                 for req in list(self.waiting):
@@ -431,6 +573,10 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.batch_type == BatchType.PREFILL_LAST:
             if self.prefill_inflight_count > 0:
                 self.prefill_inflight_count -= 1
+            if scheduler_output.head_token:
+                self.hidden_channel_manager.release_prefill(
+                    scheduler_output.head_token
+                )
             # Move completed requests from prefill_last_pending to running.
             completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
             newly_running = [

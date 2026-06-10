@@ -28,6 +28,13 @@ else:
     Request = object
 
 
+class HiddenChannelType(enum.Enum):
+    """Data-plane hidden tensor channel for edge-cloud PD separation."""
+    PREFILL_1 = "prefill_1"
+    PREFILL_2 = "prefill_2"
+    DECODE = "decode"
+
+
 class BatchType(enum.Enum):
     """Composition of a single SchedulerOutput batch.
 
@@ -289,6 +296,11 @@ class SchedulerOutput:
     # intermediate tensors payload so control-plane / data-plane alignment
     # can be verified before running the tail segment.
     head_token: str | None = None
+
+    # Data-plane hidden tensor channel for edge-cloud PD separation. Prefill
+    # head/tail batches use one of two prefill channels; decode uses the
+    # dedicated decode channel. The cloud echoes this field back unchanged.
+    hidden_channel: HiddenChannelType | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
