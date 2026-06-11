@@ -151,17 +151,37 @@ class PassiveScheduler:
         self._num_local_layers = 0
         self._total_slices = 0
         if self._layer_slice_size > 0:
-            from vllm.distributed.utils import get_pp_indices
             num_hidden_layers = (
                 vllm_config.model_config.hf_config.num_hidden_layers
             )
             pp_size = vllm_config.parallel_config.pipeline_parallel_size
-            # PassiveEngineCore is always the non-leader rank (rank 1 for
-            # PP=2). Determine its local layer count.
-            start_layer_pp, end_layer = get_pp_indices(
-                num_hidden_layers, pp_size - 1, pp_size
-            )
-            self._num_local_layers = end_layer - start_layer_pp
+            if vllm_config.parallel_config.enable_edge_cloud:
+                # Edge-cloud mode: the cloud (this PassiveScheduler side)
+                # holds the *middle* layers, not the second half of a
+                # standard PP split.  Compute local layer count from
+                # edge_head_tail_layers configured in additional_config.
+                head_k = tail_k = 1
+                additional_config = getattr(
+                    vllm_config, "additional_config", None
+                )
+                if isinstance(additional_config, dict):
+                    ec_cfg = additional_config.get("edge_cloud_config", {})
+                    htl = ec_cfg.get("edge_head_tail_layers", 1)
+                    if isinstance(htl, int):
+                        head_k = tail_k = htl
+                    elif isinstance(htl, (list, tuple)) and len(htl) >= 2:
+                        head_k = int(htl[0])
+                        tail_k = int(htl[1])
+                self._num_local_layers = max(
+                    0, num_hidden_layers - head_k - tail_k
+                )
+            else:
+                # Standard PP mode: use the second-half layer range.
+                from vllm.distributed.utils import get_pp_indices
+                start_layer_pp, end_layer = get_pp_indices(
+                    num_hidden_layers, pp_size - 1, pp_size
+                )
+                self._num_local_layers = end_layer - start_layer_pp
             self._total_slices = math.ceil(
                 self._num_local_layers / self._layer_slice_size
             )
