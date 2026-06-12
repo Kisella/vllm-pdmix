@@ -184,17 +184,11 @@ class SchedulerConfig:
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.enable_pd_separation:
-                if self.async_scheduling:
-                    from vllm.v1.core.sched.pd_separated_scheduler import (
-                        AsyncPDSeparatedScheduler,
-                    )
-
-                    return AsyncPDSeparatedScheduler
-                from vllm.v1.core.sched.pd_separated_scheduler import (
-                    PDSeparatedScheduler,
+                raise ValueError(
+                    "scheduler_config.enable_pd_separation requires a custom "
+                    "scheduler_cls provided by the hardware plugin. The PD "
+                    "scheduler implementation is not owned by vLLM core."
                 )
-
-                return PDSeparatedScheduler
             if self.async_scheduling:
                 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
