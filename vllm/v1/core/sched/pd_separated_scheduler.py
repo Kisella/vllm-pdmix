@@ -62,8 +62,9 @@ class HiddenChannelManager:
         channel = self._free_prefills.popleft()
         self._head_token_to_channel[head_token] = channel
         print(
-            f"[PD-CHAN] allocate prefill channel={channel.value} "
-            f"head_token={head_token}"
+            f"\r\n[PD-CHAN] allocate prefill channel={channel.value} "
+            f"head_token={head_token}",
+            flush=True,
         )
         return channel
 
@@ -76,7 +77,8 @@ class HiddenChannelManager:
         self._free_prefills.append(channel)
         print(
             f"[PD-CHAN] release prefill channel={channel.value} "
-            f"head_token={head_token}"
+            f"head_token={head_token}",
+            flush=True,
         )
         return channel
 
@@ -166,7 +168,7 @@ class PDSeparatedScheduler(Scheduler):
             BatchType.DECODE_LAST,
         )
         if has_work or is_tail:
-            self._log_scheduler_state(state)
+            self._log_scheduler_state(state, scheduler_output.batch_type)
         return scheduler_output
 
     def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
@@ -242,10 +244,10 @@ class PDSeparatedScheduler(Scheduler):
             and self.decode_inflight_count < self.decode_inflight_limit
         )
 
-    def _log_scheduler_state(self, state: PrefillState) -> None:
+    def _log_scheduler_state(self, state: PrefillState, batch_type: BatchType) -> None:
         self._step_counter += 1
         print(
-            f"\r\n[PD] Step{self._step_counter}, state is {state.value},    "
+            f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
             f"waiting[]: {len(self.waiting)}, "
             f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
             f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
@@ -253,7 +255,8 @@ class PDSeparatedScheduler(Scheduler):
             f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
             f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
             f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-            f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}"
+            f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+            flush=True,
         )
         for req in self.chunk_prefill_first:
             print(
@@ -261,7 +264,8 @@ class PDSeparatedScheduler(Scheduler):
                 f"num_prompt_tokens: {req.num_prompt_tokens}, "
                 f"num_tokens: {req.num_tokens}, "
                 f"num_computed_tokens: {req.num_computed_tokens}, "
-                f"chunk_num: {req.chunk_num}"
+                f"chunk_num: {req.chunk_num}",
+                flush=True,
             )
         for req in self.running:
             print(
@@ -269,7 +273,8 @@ class PDSeparatedScheduler(Scheduler):
                 f"num_prompt_tokens: {req.num_prompt_tokens}, "
                 f"num_tokens: {req.num_tokens}, "
                 f"num_computed_tokens: {req.num_computed_tokens}, "
-                f"chunk_num: {req.chunk_num}"
+                f"chunk_num: {req.chunk_num}",
+                flush=True,
             )
 
     def _pick_prefill_first_batch(self) -> SchedulerOutput:
@@ -317,7 +322,8 @@ class PDSeparatedScheduler(Scheduler):
                     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
                     f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
                     f"running[]: {len(self.running)}, "
-                    f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}"
+                    f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}",
+                    flush=True,
                 )
                 for (
                     req_id,
@@ -325,12 +331,13 @@ class PDSeparatedScheduler(Scheduler):
                 ) in scheduler_output.num_scheduled_tokens.items():
                     req = self.requests[req_id]
                     print(
-                        f"[PD] Scheduled[{req_id}],    "
+                        f"[PD] Scheduled[{req_id}], "
                         f"num_tokens: {req.num_tokens}, "
                         f"num_scheduled_token: {num_scheduled_token}, "
                         f"num_computed_tokens: {req.num_computed_tokens}, "
                         f"is_prefill_chunk: {req.is_prefill_chunk}, "
-                        f"chunk_num: {req.chunk_num}"
+                        f"chunk_num: {req.chunk_num}",
+                        flush=True,
                     )
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
@@ -363,10 +370,11 @@ class PDSeparatedScheduler(Scheduler):
             ]
         self._validate_prefill_tail_channel(so)
         print(
-            f"[PD] _pick_prefill_last_batch popped {len(last_req_ids)} reqs; "
+            f"\r\n[PD] _pick_prefill_last_batch popped {len(last_req_ids)} reqs; "
             f"remaining prefills_last_ready[]: {len(self.prefills_last_ready)}, "
             f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
-            f"hidden_channel: {so.hidden_channel}"
+            f"hidden_channel: {so.hidden_channel}",
+            flush=True,
         )
         return so
 
@@ -402,9 +410,10 @@ class PDSeparatedScheduler(Scheduler):
         )
         self._validate_decode_tail_channel(so)
         print(
-            f"[PD] _pick_decode_last_batch popped "
+            f"\r\n[PD] _pick_decode_last_batch popped "
             f"{len(so.num_scheduled_tokens)} reqs; "
-            f"remaining decodes_last_ready[]: {len(self.decodes_last_ready)}"
+            f"remaining decodes_last_ready[]: {len(self.decodes_last_ready)}",
+            flush=True,
         )
         return so
 
@@ -477,10 +486,11 @@ class PDSeparatedScheduler(Scheduler):
                 self.waiting = saved_waiting
                 self.skipped_waiting = saved_skipped
                 print(
-                    f"[PD] _pick_decode_first_batch done: "
+                    f"\r\n[PD] _pick_decode_first_batch done: "
                     f"running: {len(self.running)}, "
                     f"chunk_prefill_first: {len(self.chunk_prefill_first)}, "
-                    f"prefill_last_pending: {len(self.prefill_last_pending)}"
+                    f"prefill_last_pending: {len(self.prefill_last_pending)}",
+                    flush=True,
                 )
                 for (
                     req_id,
@@ -493,7 +503,8 @@ class PDSeparatedScheduler(Scheduler):
                         f"num_scheduled_token: {num_scheduled_token}, "
                         f"num_computed_tokens: {req.num_computed_tokens}, "
                         f"is_prefill_chunk: {req.is_prefill_chunk}, "
-                        f"chunk_num: {req.chunk_num}"
+                        f"chunk_num: {req.chunk_num}",
+                        flush=True,
                     )
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
@@ -509,7 +520,8 @@ class PDSeparatedScheduler(Scheduler):
         if completed:
             print(
                 f"[PD] _migrate_prefill_to_running: moving {len(completed)} "
-                f"requests from chunk_prefill_first to running"
+                f"requests from chunk_prefill_first to running",
+                flush=True,
             )
         for req in completed:
             self.chunk_prefill_first.remove(req)
@@ -532,13 +544,15 @@ class PDSeparatedScheduler(Scheduler):
             print(
                 f"[PD] _preempt_request: request {request.request_id} "
                 f"stays in chunk_prefill_first "
-                f"(computed={request.num_computed_tokens})"
+                f"(computed={request.num_computed_tokens})",
+                flush=True,
             )
             self.chunk_prefill_first.append(request)
         else:
             print(
                 f"[PD] _preempt_request: request {request.request_id} "
-                f"goes back to waiting (decode or finished prefill)"
+                f"goes back to waiting (decode or finished prefill)",
+                flush=True,
             )
             request.num_computed_tokens = 0
             self.waiting.prepend_request(request)
@@ -559,7 +573,8 @@ class PDSeparatedScheduler(Scheduler):
                     f"tokens={self.requests[req_id].num_tokens} "
                     f"scheduled={num_scheduled_token} "
                     f"computed={self.requests[req_id].num_computed_tokens} "
-                    f"is_prefill_chunk={self.requests[req_id].is_prefill_chunk}"
+                    f"is_prefill_chunk={self.requests[req_id].is_prefill_chunk}",
+                    flush=True,
                 )
 
         self._migrate_prefill_to_running()
@@ -591,14 +606,16 @@ class PDSeparatedScheduler(Scheduler):
             print(
                 f"[PD] update_from_output PREFILL_LAST done, "
                 f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-                f"moved {len(newly_running)} reqs to running[], running[]: {len(self.running)}"
+                f"moved {len(newly_running)} reqs to running[], running[]: {len(self.running)}",
+                flush=True,
             )
         if scheduler_output.batch_type == BatchType.DECODE_LAST:
             if self.decode_inflight_count > 0:
                 self.decode_inflight_count -= 1
             print(
                 f"[PD] update_from_output DECODE_LAST done, "
-                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}"
+                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+                flush=True,
             )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [

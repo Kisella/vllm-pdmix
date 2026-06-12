@@ -336,6 +336,7 @@ class PPSchedulerZmqChannel:
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
         """Queue a SchedulerOutput for the peer. Non-blocking."""
+        print(f"Send scheduler_output to peer, batch_type: {scheduler_output.batch_type}", flush=True)
         self._publisher.publish(scheduler_output)
 
     def consume_new_outputs(self) -> list[tuple[int, SchedulerOutput]]:
@@ -823,7 +824,7 @@ class EngineCore:
         new_outputs = self._pp_pd_channel.consume_new_outputs()
         for _seq, so in new_outputs:
             bt = so.batch_type
-            print(f"Received scheduler_output from cloud, batch_type: {bt}",flush=True)
+            print(f"Received scheduler_output from cloud, batch_type: {bt}", flush=True)
             if bt == BatchType.PREFILL_LAST:
                 self.scheduler.prefills_last_ready.append(so)
             elif bt == BatchType.DECODE_LAST:
@@ -2742,6 +2743,26 @@ class PassiveEngineCoreProc:
         batch = self.passive_scheduler.schedule()
         if batch.is_empty():
             return False
+
+        _slice_info_str = "["
+        for s in batch.slices:
+            if s is not None:
+                _slice_info_str += (
+                    f"slice_index={s.slice_index},"
+                    f"start={s.start_layer},"
+                    f"end={s.end_layer},"
+                    f"is_last={s.is_last_slice};"
+                )
+            else:
+                _slice_info_str += "None;"
+        _slice_info_str += "]"
+        print(
+            f"\r\n[Cloud] Step dispatched batch_type="
+            f"{batch.scheduler_output.batch_type.value}, "
+            f"slices_count={len(batch.slices)}, "
+            f"slice_info={_slice_info_str}",
+            flush=True,
+        )
 
         for slice_info in batch.slices:
             # PD-separation: on the cloud side, publish the rewritten
