@@ -746,6 +746,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+    
     # Set by PassiveEngineCoreProc before creating the MultiprocExecutor.
     "VLLM_PP_NON_LEADER_ENGINE_CORE": lambda: bool(
         int(os.getenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "0"))
