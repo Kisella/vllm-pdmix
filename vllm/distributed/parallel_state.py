@@ -982,8 +982,7 @@ class GroupCoordinator:
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             elif tensor.device.type == "npu":
-                import torch_npu
-                tensor.record_stream(torch_npu.current_stream(tensor.device))
+                tensor.record_stream(torch.npu.current_stream(tensor.device))
             handles.append(handle)
 
         return handles
