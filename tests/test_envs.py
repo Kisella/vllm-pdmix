@@ -36,6 +36,42 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_pd_separation_env_vars_registered_and_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    disable_envs_cache()
+    for name in (
+        "VLLM_PP_NON_LEADER_ENGINE_CORE",
+        "VLLM_PP_SCHEDULER_ZMQ_ADDR",
+        "VLLM_PP_PRE_OUT_ZMQ_PORT",
+        "VLLM_PP_POST_OUT_ZMQ_PORT",
+        "VLLM_LAYER_SLICE_SIZE",
+        "VLLM_PP_PASSIVE_DISPATCH_POLICY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert envs.VLLM_PP_NON_LEADER_ENGINE_CORE is False
+    assert envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None
+    assert envs.VLLM_PP_PRE_OUT_ZMQ_PORT == 5558
+    assert envs.VLLM_PP_POST_OUT_ZMQ_PORT == 5559
+    assert envs.VLLM_LAYER_SLICE_SIZE == 0
+    assert envs.VLLM_PP_PASSIVE_DISPATCH_POLICY == "expect_alternation"
+
+    monkeypatch.setenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "1")
+    monkeypatch.setenv("VLLM_PP_SCHEDULER_ZMQ_ADDR", "tcp://127.0.0.1:5557")
+    monkeypatch.setenv("VLLM_PP_PRE_OUT_ZMQ_PORT", "6001")
+    monkeypatch.setenv("VLLM_PP_POST_OUT_ZMQ_PORT", "6002")
+    monkeypatch.setenv("VLLM_LAYER_SLICE_SIZE", "4")
+    monkeypatch.setenv("VLLM_PP_PASSIVE_DISPATCH_POLICY", "decode_first")
+
+    assert envs.VLLM_PP_NON_LEADER_ENGINE_CORE is True
+    assert envs.VLLM_PP_SCHEDULER_ZMQ_ADDR == "tcp://127.0.0.1:5557"
+    assert envs.VLLM_PP_PRE_OUT_ZMQ_PORT == 6001
+    assert envs.VLLM_PP_POST_OUT_ZMQ_PORT == 6002
+    assert envs.VLLM_LAYER_SLICE_SIZE == 4
+    assert envs.VLLM_PP_PASSIVE_DISPATCH_POLICY == "decode_first"
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

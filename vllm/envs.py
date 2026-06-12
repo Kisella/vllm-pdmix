@@ -47,6 +47,12 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_PP_NON_LEADER_ENGINE_CORE: bool = False
+    VLLM_PP_SCHEDULER_ZMQ_ADDR: str | None = None
+    VLLM_PP_PRE_OUT_ZMQ_PORT: int = 5558
+    VLLM_PP_POST_OUT_ZMQ_PORT: int = 5559
+    VLLM_LAYER_SLICE_SIZE: int = 0
+    VLLM_PP_PASSIVE_DISPATCH_POLICY: str = "expect_alternation"
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -740,6 +746,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+    # Set by PassiveEngineCoreProc before creating the MultiprocExecutor.
+    "VLLM_PP_NON_LEADER_ENGINE_CORE": lambda: bool(
+        int(os.getenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "0"))
+    ),
+    # ZMQ address used by PP leader to publish SchedulerOutput to passive
+    # non-leader PP ranks.
+    "VLLM_PP_SCHEDULER_ZMQ_ADDR": lambda: os.getenv(
+        "VLLM_PP_SCHEDULER_ZMQ_ADDR", None
+    ),
+    # Edge-cloud PD separation: edge -> cloud PRE_OUT channel.
+    "VLLM_PP_PRE_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_PRE_OUT_ZMQ_PORT", "5558")
+    ),
+    # Edge-cloud PD separation: cloud -> edge POST_OUT channel.
+    "VLLM_PP_POST_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_POST_OUT_ZMQ_PORT", "5559")
+    ),
+    # Layer slice size for non-leader PP rank passive execution.
+    "VLLM_LAYER_SLICE_SIZE": lambda: int(os.getenv("VLLM_LAYER_SLICE_SIZE", "0")),
+    # Dispatch policy for the non-leader PP rank's PassiveScheduler.
+    "VLLM_PP_PASSIVE_DISPATCH_POLICY": lambda: os.getenv(
+        "VLLM_PP_PASSIVE_DISPATCH_POLICY", "expect_alternation"
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (
