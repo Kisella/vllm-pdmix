@@ -2765,14 +2765,6 @@ class PassiveEngineCoreProc:
         )
 
         for slice_info in batch.slices:
-            # PD-separation: on the cloud side, publish the rewritten
-            # tail-segment SchedulerOutput on POST_OUT only when the dispatched
-            # work can produce the final middle-segment hidden state.  With
-            # slice-aware scheduling, early prefill slices must not wake the
-            # edge tail segment because doing so can block the edge on a recv
-            # and prevent it from issuing decode head work between P slices.
-            if slice_info is None or slice_info.is_last_slice:
-                self._maybe_publish_post_out(batch.scheduler_output)
 
             payload = (
                 (batch.scheduler_output, slice_info)
@@ -2782,6 +2774,14 @@ class PassiveEngineCoreProc:
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
             )
+            # PD-separation: on the cloud side, publish the rewritten
+            # tail-segment SchedulerOutput on POST_OUT only when the dispatched
+            # work can produce the final middle-segment hidden state.  With
+            # slice-aware scheduling, early prefill slices must not wake the
+            # edge tail segment because doing so can block the edge on a recv
+            # and prevent it from issuing decode head work between P slices.
+            if slice_info is None or slice_info.is_last_slice:
+                self._maybe_publish_post_out(batch.scheduler_output)
         return True
 
     def _maybe_publish_post_out(
