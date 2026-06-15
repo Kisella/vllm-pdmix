@@ -195,9 +195,6 @@ class ParallelConfig:
 
     enable_edge_cloud: bool = False
     """Enable edge-cloud collaboration mode for Ascend NPU."""
-    enable_pd_separation: bool = False
-    """If True, enable PD batch separation scheduling under edge-cloud mode.
-    Requires --enable-edge-cloud to be set."""
     edge_npu_count: int = 0
     """Number of NPUs on the edge node when edge-cloud mode is enabled."""
     cloud_npu_count: int = 0
@@ -812,11 +809,6 @@ class ParallelConfig:
             self.pipeline_parallel_size = 2
             self.tensor_parallel_size = (
                 self.edge_npu_count if self.is_edge_node else self.cloud_npu_count
-            )
-
-        if self.enable_pd_separation and not self.enable_edge_cloud:
-            raise ValueError(
-                "--enable-pd-separation requires --enable-edge-cloud to be set."
             )
 
         if self.distributed_executor_backend == "external_launcher":
