@@ -89,6 +89,19 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _import_passive_scheduler_module():
+    try:
+        import vllm.v1.core.sched.passive_scheduler as passive_scheduler
+    except ImportError as err:
+        raise RuntimeError(
+            "PassiveScheduler is provided by the hardware plugin. "
+            "Install and load a plugin that registers "
+            "vllm.v1.core.sched.passive_scheduler before starting "
+            "PassiveEngineCore."
+        ) from err
+    return passive_scheduler
+
+
 class PPSchedulerZmqPublisher:
     """Publishes SchedulerOutput from pp rank0 EngineCore to pp rank1
     PassiveEngineCore via ZMQ PUSH/PULL pattern.
@@ -813,13 +826,14 @@ class EngineCore:
         """
         if self._pp_pd_channel is None:
             return
-        # Defer the import to avoid a hard module-level coupling — `EngineCore`
-        # may be running with a different scheduler when PD-separation is off.
+        # Avoid importing a concrete PD scheduler implementation from vLLM core.
+        # Hardware plugins own that scheduler and only need to expose the two
+        # ready queues consumed here.
         from vllm.v1.core.sched.output import BatchType
-        from vllm.v1.core.sched.pd_separated_scheduler import (
-            PDSeparatedScheduler,
-        )
-        if not isinstance(self.scheduler, PDSeparatedScheduler):
+        if not (
+            hasattr(self.scheduler, "prefills_last_ready")
+            and hasattr(self.scheduler, "decodes_last_ready")
+        ):
             return
         new_outputs = self._pp_pd_channel.consume_new_outputs()
         for _seq, so in new_outputs:
@@ -2706,15 +2720,12 @@ class PassiveEngineCoreProc:
         dispatch_policy: "DispatchPolicy | None" = None,
         pp_pd_channel: "PPSchedulerZmqChannel | None" = None,
     ) -> None:
-        from vllm.v1.core.sched.passive_scheduler import (
-            DispatchPolicy,
-            PassiveScheduler,
-        )
+        passive_scheduler_module = _import_passive_scheduler_module()
         if dispatch_policy is None:
-            dispatch_policy = DispatchPolicy.EXPECT_ALTERNATION
+            dispatch_policy = passive_scheduler_module.DispatchPolicy.EXPECT_ALTERNATION
         self.vllm_config = vllm_config
         self.executor = executor
-        self.passive_scheduler = PassiveScheduler(
+        self.passive_scheduler = passive_scheduler_module.PassiveScheduler(
             vllm_config, pp_subscriber, dispatch_policy=dispatch_policy
         )
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
@@ -2883,16 +2894,17 @@ class PassiveEngineCoreProc:
             if pp_subscriber is not None:
                 executor.start_worker_monitor(inline=False)
 
-                from vllm.v1.core.sched.passive_scheduler import DispatchPolicy
+                passive_scheduler_module = _import_passive_scheduler_module()
+                dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
                 try:
-                    policy = DispatchPolicy(envs.VLLM_PP_PASSIVE_DISPATCH_POLICY)
+                    policy = dispatch_policy_cls(envs.VLLM_PP_PASSIVE_DISPATCH_POLICY)
                 except ValueError:
                     logger.warning(
                         "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
                         "falling back to expect_alternation.",
                         envs.VLLM_PP_PASSIVE_DISPATCH_POLICY,
                     )
-                    policy = DispatchPolicy.EXPECT_ALTERNATION
+                    policy = dispatch_policy_cls.EXPECT_ALTERNATION
 
                 # Set up edge-cloud PD-separation channel (cloud side).
                 # The cloud binds POST_OUT and connects PRE_OUT via
