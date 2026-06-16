@@ -453,7 +453,6 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     master_addr: str = ParallelConfig.master_addr
     master_port: int = ParallelConfig.master_port
-    cloud_addr: str | None = ParallelConfig.cloud_addr
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
@@ -939,7 +938,6 @@ class EngineArgs:
         )
         parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
-        parallel_group.add_argument("--cloud-addr", **parallel_kwargs["cloud_addr"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
         parallel_group.add_argument(
@@ -1924,7 +1922,6 @@ class EngineArgs:
             data_parallel_size_local=data_parallel_size_local,
             master_addr=self.master_addr,
             master_port=self.master_port,
-            cloud_addr=self.cloud_addr,
             nnodes=self.nnodes,
             node_rank=self.node_rank,
             distributed_timeout_seconds=self.distributed_timeout_seconds,

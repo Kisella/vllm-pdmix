@@ -262,18 +262,11 @@ class ParallelConfig:
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
     master_addr: str = "127.0.0.1"
-    """distributed master address for multi-node distributed
+    """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     master_port: int = 29501
-    """distributed master port for multi-node distributed
+    """distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    cloud_addr: str | None = None
-    """In edge-cloud PD-separation mode, the host of the cloud rank that
-    binds the POST_OUT ZMQ channel (cloud → edge SchedulerOutput return
-    path). The edge (rank 0) connects to ``tcp://<cloud_addr>:<port>`` to
-    consume PREFILL_LAST / DECODE_LAST batches. The cloud itself does not
-    use this value (it binds to ``tcp://*:<port>``). Required when running
-    a PD-separated edge engine; ignored otherwise."""
     node_rank: int = 0
     """distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -747,7 +740,6 @@ class ParallelConfig:
             "rank",
             "master_addr",
             "master_port",
-            "cloud_addr",
             "node_rank",
             "nnodes",
             "max_parallel_loading_workers",
