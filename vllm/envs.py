@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     VLLM_PP_SCHEDULER_ZMQ_ADDR: str | None = None
     VLLM_PP_PRE_OUT_ZMQ_PORT: int = 5558
     VLLM_PP_POST_OUT_ZMQ_PORT: int = 5559
-    VLLM_LAYER_SLICE_SIZE: int = 0
     VLLM_PP_PASSIVE_DISPATCH_POLICY: str = "expect_alternation"
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -783,9 +782,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # slice is executed as a separate forward pass (with a CUDA sync between
     # slices). This enables layerwise-disaggregated execution similar to
     # MindIE's LayerwiseCloudPrefillGraphWrapper. Only effective when PP > 1.
-    "VLLM_LAYER_SLICE_SIZE": lambda: int(
-        os.getenv("VLLM_LAYER_SLICE_SIZE", "0")
-    ),
     # Dispatch policy for the non-leader PP rank's PassiveScheduler.
     # One of: "expect_alternation" (default), "prefill_first",
     # "decode_first", "pdmix_first". The default implements the cloud-side
