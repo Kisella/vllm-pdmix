@@ -6731,17 +6731,6 @@ class GPUModelRunner(
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
-        # 将 block_sizes 中的所有元素都变更为它们中的最小值，
-        # 并基于统一后的 block_size 重新计算 max_num_blocks，
-        # 以保证 multi-group 场景下 BlockTable 容量一致。
-        if block_sizes:
-            min_block_size = min(block_sizes)
-            block_sizes = [min_block_size] * len(block_sizes)
-            max_num_blocks = [
-                cdiv(max_model_len, min_block_size * get_total_cp_world_size())
-                for _ in block_sizes
-            ]
-
         if (
             block_sizes != self._init_block_sizes
             or kernel_block_sizes != self._init_kernel_block_sizes
