@@ -132,16 +132,6 @@ class CoreEngineProcManager:
 
         from vllm.v1.engine.core import EngineCoreProc
 
-        print(
-            "### PDDBG EngineCoreProc.run_engine_core target before Process",
-            EngineCoreProc.run_engine_core,
-            "module=",
-            getattr(EngineCoreProc.run_engine_core, "__module__", None),
-            "has_wrapped=",
-            hasattr(EngineCoreProc.run_engine_core, "__wrapped__"),
-            flush=True,
-        )
-
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
