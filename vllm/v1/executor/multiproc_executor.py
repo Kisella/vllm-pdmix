@@ -231,6 +231,7 @@ class MultiprocExecutor(Executor):
                         ]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
+
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
 
@@ -570,18 +571,28 @@ class WorkerProc:
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
         if vllm_config.parallel_config.nnodes_within_dp == 1:
-            # Single-node: use local MQ
+            # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
                 input_shm_handle, self.worker.rank
             )
+
+            # Initializes a message queue for sending the model output
             self.worker_response_mq = MessageQueue(1, 1)
             self.peer_response_handles = []
         else:
-            # Leader node multi-node: use cross-node MQ via inner_dp_world_group
+            # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
             self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
                 external_writer_handle=input_shm_handle,
+                # Since there is external_writer_handle from executor proc,
+                # where the ready signal from actual writer is sent out of the
+                # create_mq_broadcaster method and after this setup, we make it
+                # non blocking. The handshake will be triggered when
+                # worker.rpc_broadcast_mq.wait_until_ready() is called
                 blocking=False,
             )
+            # Initializes remote message queue for sending the model output to the
+            # driver worker, exposing peer_response_handles for driver worker
+            # that include handles for all ranks
             self.worker_response_mq, self.peer_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
                     reader_rank_in_group=0, vllm_config=vllm_config
@@ -600,7 +611,6 @@ class WorkerProc:
         is_driver_worker: bool,
     ):
         self.rank = rank
-        self.local_rank = local_rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -795,10 +805,9 @@ class WorkerProc:
                 logger.warning("Death monitoring error: %s", e)
 
         # Pass queue references directly to avoid gc issues if passing self
-        queues = [self.rpc_broadcast_mq, self.worker_response_mq]
         Thread(
             target=death_pipe_monitor,
-            args=(queues,),
+            args=([self.rpc_broadcast_mq, self.worker_response_mq],),
             daemon=True,
             name="DeathPipeMonitor",
         ).start()
@@ -856,7 +865,7 @@ class WorkerProc:
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
-            # Send READY once we know everything is loaded.
+            # Send READY once we know everything is loaded
             ready_writer.send(
                 {
                     "status": WorkerProc.READY_STR,
@@ -960,8 +969,9 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
-            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
-
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
+                indefinite=True
+            )
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
@@ -982,7 +992,6 @@ class WorkerProc:
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
-
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
