@@ -66,14 +66,14 @@ from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
-import debugpy
-try:
-    port = 8009
-    debugpy.listen(("0.0.0.0", port))
-    print(f"Debugpy is listening on port {port}, wait_for_client")
-    debugpy.wait_for_client()
-except (RuntimeError, OSError) as e:
-    print(f"Debugpy listen skipped")
+#import debugpy
+#try:
+#    port = 8009
+#    debugpy.listen(("0.0.0.0", port))
+#    print(f"Debugpy is listening on port {port}, wait_for_client")
+#    debugpy.wait_for_client()
+#except (RuntimeError, OSError) as e:
+#    print(f"Debugpy listen skipped")
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 

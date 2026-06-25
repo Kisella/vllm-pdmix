@@ -1075,6 +1075,7 @@ class WorkerProc:
         assert self.rpc_broadcast_mq is not None
         run_rpc_broadcast_mq = True
         run_local_rpc_broadcast_mq = False
+        ttt = time.perf_counter()
         while True:
             # Poll local MQ for pp scheduler output from passive
             # EngineCore (non-blocking).
@@ -1084,6 +1085,7 @@ class WorkerProc:
                         self.local_rpc_broadcast_mq.dequeue(timeout=0)
                     )
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
+                        xxx = time.perf_counter()
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
                         # Execute model with the received SchedulerOutput.
@@ -1104,6 +1106,7 @@ class WorkerProc:
                                 run_local_rpc_broadcast_mq = False
                                 self.handle_output(e)
                             continue
+                        logger.warning(f"mdf scheduler_output batch_type {scheduler_output.batch_type} time.perf_counter {ttt} interval {(xxx - ttt) * 1000}")
                         # For layer slicing: non-last slices produce
                         # no external output; keep polling local MQ for
                         # the next slice.  Last slice (or no slicing)
@@ -1143,6 +1146,7 @@ class WorkerProc:
                     BatchType.DECODE_LAST,
                 )
             ):
+                print(f"##################### Skip tail-segment execute_model from cross-node MQ on pp rank1 workers.")
                 continue
 
             # Skip execute_model from cross-node MQ on pp rank1 workers.
@@ -1155,6 +1159,9 @@ class WorkerProc:
             ):
                 run_rpc_broadcast_mq = False
                 run_local_rpc_broadcast_mq = True
+                scheduler_output_tmp = args[0]
+                ttt = time.perf_counter()
+                logger.warning(f"ori scheduler_output batch_type {scheduler_output_tmp.batch_type} time.perf_counter {ttt}")
                 continue
             try:
                 if isinstance(method, str):
