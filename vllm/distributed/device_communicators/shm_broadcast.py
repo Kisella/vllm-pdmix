@@ -700,8 +700,13 @@ class MessageQueue:
                 self._spin_condition.record_read()
                 break
 
-    def enqueue(self, obj, timeout: float | None = None):
-        """Write to message queue with optional timeout (in seconds)"""
+    def enqueue(
+        self,
+        obj,
+        timeout: float | None = None,
+        local_only: bool = False,
+    ):
+        """Write to message queue with optional timeout (in seconds)."""
         assert self._is_writer, "Only writers can enqueue"
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
@@ -742,7 +747,7 @@ class MessageQueue:
 
             self._spin_condition.notify()
 
-        if self.n_remote_reader > 0:
+        if self.n_remote_reader > 0 and not local_only:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
     def dequeue(

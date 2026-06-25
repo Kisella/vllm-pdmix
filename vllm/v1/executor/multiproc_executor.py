@@ -58,7 +58,7 @@ from vllm.utils.system_utils import (
     get_mp_context,
     set_process_title,
 )
-from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -357,6 +357,22 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
+    def _is_edge_cloud_tail_execute_model(
+        self,
+        method: str | Callable,
+        args: tuple,
+    ) -> bool:
+        return (
+            getattr(self.parallel_config, "enable_edge_cloud", False)
+            and isinstance(method, str)
+            and method == "execute_model"
+            and args
+            and getattr(args[0], "batch_type", None) in (
+                BatchType.PREFILL_LAST,
+                BatchType.DECODE_LAST,
+            )
+        )
+
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
@@ -424,7 +440,11 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        local_only = self._is_edge_cloud_tail_execute_model(method, args)
+        self.rpc_broadcast_mq.enqueue(
+            (send_method, args, kwargs, output_rank),
+            local_only=local_only,
+        )
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
@@ -1110,9 +1130,24 @@ class WorkerProc:
             except TimeoutError:
                 continue
 
+            # Skip tail-segment execute_model from cross-node MQ on pp rank1
+            # workers. PREFILL_LAST/DECODE_LAST execute only on the edge; the
+            # cloud passive EngineCore is not notified for these batches.
+            if (
+                self.local_rpc_broadcast_mq is not None
+                and isinstance(method, str)
+                and method == "execute_model"
+                and args
+                and args[0].batch_type in (
+                    BatchType.PREFILL_LAST,
+                    BatchType.DECODE_LAST,
+                )
+            ):
+                continue
+
             # Skip execute_model from cross-node MQ on pp rank1 workers.
-            # These workers execute model only when triggered by their
-            # local passive EngineCore via local_rpc_broadcast_mq.
+            # These workers execute cloud middle segments only when triggered by
+            # their local passive EngineCore via local_rpc_broadcast_mq.
             if (
                 self.local_rpc_broadcast_mq is not None
                 and isinstance(method, str)
