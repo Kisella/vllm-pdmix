@@ -1079,7 +1079,9 @@ class WorkerProc:
         assert self.rpc_broadcast_mq is not None
         run_rpc_broadcast_mq = True
         run_local_rpc_broadcast_mq = False
-        ttt = time.perf_counter()
+        t1 = time.perf_counter()
+        t2 = time.perf_counter()
+        t3 = time.perf_counter()
         while True:
             # Poll local MQ for pp scheduler output from passive
             # EngineCore (non-blocking).
@@ -1089,7 +1091,8 @@ class WorkerProc:
                         self.local_rpc_broadcast_mq.dequeue(timeout=0)
                     )
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
-                        xxx = time.perf_counter()
+                        t2 = time.perf_counter()
+                        scheduler_interval = (t2 - t3) * 1000
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
                         # Execute model with the received SchedulerOutput.
@@ -1110,7 +1113,8 @@ class WorkerProc:
                                 run_local_rpc_broadcast_mq = False
                                 self.handle_output(e)
                             continue
-                        logger.warning(f"mdf scheduler_output batch_type {scheduler_output.batch_type} time.perf_counter {ttt} interval {(xxx - ttt) * 1000}")
+                        t3 = time.perf_counter()
+                        logger.info(f"{scheduler_output.batch_type} time.perf_counter {t1} queue_interval {(t2 - t1) * 1000} execute_model_interval {(t3 - t2) * 1000} scheduler_interval {scheduler_interval}")
                         # For layer slicing: non-last slices produce
                         # no external output; keep polling local MQ for
                         # the next slice.  Last slice (or no slicing)
@@ -1164,8 +1168,8 @@ class WorkerProc:
                 run_rpc_broadcast_mq = False
                 run_local_rpc_broadcast_mq = True
                 scheduler_output_tmp = args[0]
-                ttt = time.perf_counter()
-                logger.info(f"ori scheduler_output batch_type {scheduler_output_tmp.batch_type} time.perf_counter {ttt}")
+                t1 = time.perf_counter()
+                logger.info(f"ori scheduler_output batch_type {scheduler_output_tmp.batch_type} time.perf_counter {t1}")
                 continue
             try:
                 if isinstance(method, str):
