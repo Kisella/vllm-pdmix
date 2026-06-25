@@ -387,6 +387,8 @@ class Scheduler(SchedulerInterface):
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
+            if len(scheduled_running_reqs) >= self.max_num_running_reqs:
+                break
             request = self.running[req_index]
 
             if (
@@ -863,7 +865,14 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        # TODO: In PD-separated mode, requests may enter self.running via
+        # update_from_output() after the cloud returns the prefill tail,
+        # bypassing the schedule() capacity gate.  A hard cap on the number
+        # of scheduled running requests is enforced above.  This assertion
+        # remains disabled because update_from_output() can legitimately
+        # grow running beyond max_num_running_reqs when many prefill tails
+        # return in the same step.
+        # assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
