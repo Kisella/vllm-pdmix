@@ -1148,9 +1148,9 @@ class WorkerProc:
                 and args[0].batch_type in (
                     BatchType.PREFILL_LAST,
                     BatchType.DECODE_LAST,
+                    BatchType.EMPTY,
                 )
             ):
-                print(f"##################### Skip tail-segment execute_model from cross-node MQ on pp rank1 workers.")
                 continue
 
             # Skip execute_model from cross-node MQ on pp rank1 workers.
@@ -1165,7 +1165,7 @@ class WorkerProc:
                 run_local_rpc_broadcast_mq = True
                 scheduler_output_tmp = args[0]
                 ttt = time.perf_counter()
-                logger.warning(f"ori scheduler_output batch_type {scheduler_output_tmp.batch_type} time.perf_counter {ttt}")
+                logger.info(f"ori scheduler_output batch_type {scheduler_output_tmp.batch_type} time.perf_counter {ttt}")
                 continue
             try:
                 if isinstance(method, str):
