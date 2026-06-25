@@ -521,6 +521,19 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
+        logger.warning(
+            "batch_queue before pop: %d items",
+            len(batch_queue),
+            extra={
+                "batch_queue_items": [
+                    {
+                        "batch_type": item[1].batch_type.value,
+                        "total_num_scheduled_tokens": item[1].total_num_scheduled_tokens,
+                    }
+                    for item in batch_queue
+                ],
+            },
+        )
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),

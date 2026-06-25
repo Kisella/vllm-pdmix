@@ -1134,6 +1134,19 @@ class WorkerProc:
 
             # Poll cross-node MQ with short timeout so we can
             # periodically check the local MQ.
+            messages = self.rpc_broadcast_mq.peek()
+            if messages:
+                methods = []
+                for msg in messages:
+                    if isinstance(msg, tuple) and len(msg) >= 1:
+                        method_name = msg[0]
+                        if isinstance(method_name, str):
+                            methods.append(method_name)
+                        elif isinstance(method_name, bytes):
+                            methods.append(f"bytes({len(method_name)})")
+                        else:
+                            methods.append(str(type(method_name).__name__))
+                logger.info(f"rpc_broadcast_mq has {len(messages)} valid messages, methods: {methods}")
             try:
                 method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                     timeout=0.1

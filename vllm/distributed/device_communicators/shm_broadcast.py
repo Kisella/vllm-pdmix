@@ -777,6 +777,37 @@ class MessageQueue:
             raise RuntimeError("Only readers can dequeue")
         return obj
 
+    def peek(self) -> list[Any]:
+        """Peek at all available messages in the queue without removing them."""
+        if self._is_local_reader:
+            messages = []
+            start_idx = self.current_idx
+            for _ in range(self.buffer.max_chunks):
+                with self.buffer.get_metadata(start_idx) as metadata_buffer:
+                    memory_fence()
+                    read_flag = metadata_buffer[self.local_reader_rank + 1]
+                    written_flag = metadata_buffer[0]
+                    if written_flag and not read_flag:
+                        with self.buffer.get_data(start_idx) as buf:
+                            overflow = buf[0] == 1
+                            if not overflow:
+                                offset = 3
+                                buf_count = from_bytes_big(buf[1:offset])
+                                all_buffers = []
+                                for i in range(buf_count):
+                                    buf_offset = offset + 4
+                                    buf_len = from_bytes_big(buf[offset:buf_offset])
+                                    offset = buf_offset + buf_len
+                                    all_buffers.append(buf[buf_offset:offset])
+                                obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
+                                messages.append(obj)
+                    start_idx = (start_idx + 1) % self.buffer.max_chunks
+            return messages
+        elif self._is_remote_reader:
+            return []
+        else:
+            return []
+
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
         timeout_ms = None if timeout is None else int(timeout * 1000)
