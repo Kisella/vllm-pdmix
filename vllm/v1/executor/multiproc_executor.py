@@ -1146,7 +1146,7 @@ class WorkerProc:
                             methods.append(f"bytes({len(method_name)})")
                         else:
                             methods.append(str(type(method_name).__name__))
-                logger.info(f"rpc_broadcast_mq has {len(messages)} valid messages, methods: {methods}")
+                logger.warning(f"rpc_broadcast_mq has {len(messages)} valid messages, methods: {methods}")
             try:
                 method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                     timeout=0.1
