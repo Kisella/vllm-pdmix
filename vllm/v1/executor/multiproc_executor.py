@@ -1189,7 +1189,11 @@ class WorkerProc:
                     func = getattr(self.worker, method)
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
-
+                bt = None
+                if method == "execute_model":
+                    scheduler_output_tmp = args[0]
+                    bt = scheduler_output_tmp.batch_type
+                logger.warning(f"rpc_broadcast_mq method {method} batch_type {bt}")
                 output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
