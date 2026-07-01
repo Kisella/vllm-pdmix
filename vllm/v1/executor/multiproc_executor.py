@@ -360,6 +360,18 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        # Edge-cloud: deliver execute_model to local edge workers only,
+        # skipping the cross-node send to the cloud. The cloud receives work
+        # solely via ZMQ (PassiveEngineCore -> cloud local rpc_broadcast_mq,
+        # method b"pp_scheduler_output"); edge-only tail segments
+        # (PREFILL_LAST / DECODE_LAST) must never be serialized cross-node.
+        # Edge workers are local readers of rpc_broadcast_mq and are
+        # unaffected by local_only; only the remote (TCP) send is skipped.
+        pc = self.parallel_config
+        local_only = bool(
+            getattr(pc, "enable_edge_cloud", False)
+            and getattr(pc, "is_edge_node", False)
+        )
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -367,6 +379,7 @@ class MultiprocExecutor(Executor):
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
+            local_only=local_only,
         )
 
     def sample_tokens(  # type: ignore[override]
@@ -399,6 +412,7 @@ class MultiprocExecutor(Executor):
         non_block: bool = False,
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator | None = None,
+        local_only: bool = False,
     ) -> Any:
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
@@ -424,7 +438,9 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        self.rpc_broadcast_mq.enqueue(
+            (send_method, args, kwargs, output_rank), local_only=local_only
+        )
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
