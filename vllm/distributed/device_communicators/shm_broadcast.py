@@ -430,6 +430,7 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
+        self._init_debug()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -491,6 +492,7 @@ class MessageQueue:
             self._spin_condition = None  # type: ignore
 
         self.shutting_down = False
+        self._init_debug()
         return self
 
     def wait_until_ready(self):
@@ -655,6 +657,9 @@ class MessageQueue:
         read_timeout = self.ReadTimeoutWithWarnings(
             timeout=timeout, should_warn=not indefinite
         )
+        _dbg = getattr(self, "_dbg_enabled", False)
+        _dbg_wait_t0 = time.monotonic() if _dbg else 0.0
+        _dbg_spun = False
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
             while True:
                 # Memory fence ensures we see the latest writes from the writer.
@@ -671,6 +676,7 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
+                    _dbg_spun = True
                     self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
                     if self.shutting_down:
@@ -683,6 +689,14 @@ class MessageQueue:
                         )
 
                     continue
+                # found a block that is not read by this reader
+                # let caller read from the buffer
+                if _dbg:
+                    self._dbg_last_wait = (
+                        time.monotonic() - _dbg_wait_t0 if _dbg_spun else 0.0
+                    )
+                with self.buffer.get_data(self.current_idx) as buf:
+                    yield buf
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
@@ -756,12 +770,74 @@ class MessageQueue:
         if self.n_remote_reader > 0 and not local_only:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
+    def _init_debug(self) -> None:
+        """Initialize lightweight dequeue timing stats.
+
+        Enabled only when env var VLLM_MQ_DEBUG_TIMING is set, so this is a
+        no-op in production. Used to split a slow ``dequeue`` into
+        (a) time waiting for the writer to publish a ready block and
+        (b) time spent in ``pickle.loads`` deserializing the payload,
+        plus the payload size — to tell whether a growing dequeue latency
+        is caused by a slow producer or by a large/bloating message.
+        """
+        import os
+        self._dbg_enabled = os.environ.get(
+            "VLLM_MQ_DEBUG_TIMING", ""
+        ).lower() in ("1", "true", "yes", "on")
+        self._dbg_n = 0
+        self._dbg_window = 200
+        self._dbg_sum_wait = 0.0
+        self._dbg_sum_deser = 0.0
+        self._dbg_sum_total = 0.0
+        self._dbg_max_payload = 0
+        self._dbg_overflow_count = 0
+        self._dbg_last_wait = 0.0
+
+    def _record_dequeue_dbg(
+        self,
+        wait: float,
+        deserialize: float,
+        payload_bytes: int,
+        overflow: bool,
+        total: float,
+        remote: bool,
+    ) -> None:
+        self._dbg_n += 1
+        self._dbg_sum_wait += wait
+        self._dbg_sum_deser += deserialize
+        self._dbg_sum_total += total
+        if payload_bytes > self._dbg_max_payload:
+            self._dbg_max_payload = payload_bytes
+        if overflow:
+            self._dbg_overflow_count += 1
+        if self._dbg_n >= self._dbg_window:
+            n = self._dbg_n
+            logger.info(
+                "MQ.dequeue[dbg] n=%d avg_total=%.2fms avg_wait=%.2fms "
+                "avg_deser=%.2fms max_payload=%.2fMB overflow=%d remote=%s",
+                n,
+                self._dbg_sum_total / n * 1000,
+                self._dbg_sum_wait / n * 1000,
+                self._dbg_sum_deser / n * 1000,
+                self._dbg_max_payload / 1024 / 1024,
+                self._dbg_overflow_count,
+                remote,
+            )
+            self._dbg_n = 0
+            self._dbg_sum_wait = 0.0
+            self._dbg_sum_deser = 0.0
+            self._dbg_sum_total = 0.0
+            self._dbg_max_payload = 0
+            self._dbg_overflow_count = 0
+
     def dequeue(
         self,
         timeout: float | None = None,
         indefinite: bool = False,
     ):
         """Read from message queue with optional timeout (in seconds)"""
+        _dbg = getattr(self, "_dbg_enabled", False)
+        _t0 = time.monotonic() if _dbg else 0.0
         if self._is_local_reader:
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
@@ -769,16 +845,49 @@ class MessageQueue:
                     offset = 3
                     buf_count = from_bytes_big(buf[1:offset])
                     all_buffers = []
+                    _payload_bytes = 0
                     for i in range(buf_count):
                         buf_offset = offset + 4
                         buf_len = from_bytes_big(buf[offset:buf_offset])
                         offset = buf_offset + buf_len
                         all_buffers.append(buf[buf_offset:offset])
+                        if _dbg:
+                            _payload_bytes += buf_len
+                    _p0 = time.monotonic() if _dbg else 0.0
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
+                    if _dbg:
+                        self._record_dequeue_dbg(
+                            wait=getattr(self, "_dbg_last_wait", 0.0),
+                            deserialize=time.monotonic() - _p0,
+                            payload_bytes=_payload_bytes,
+                            overflow=False,
+                            total=time.monotonic() - _t0,
+                            remote=False,
+                        )
             if overflow:
+                _r0 = time.monotonic() if _dbg else 0.0
                 obj = MessageQueue.recv(self.local_socket, timeout)
+                if _dbg:
+                    self._record_dequeue_dbg(
+                        wait=getattr(self, "_dbg_last_wait", 0.0),
+                        deserialize=time.monotonic() - _r0,
+                        payload_bytes=0,
+                        overflow=True,
+                        total=time.monotonic() - _t0,
+                        remote=False,
+                    )
         elif self._is_remote_reader:
+            _r0 = time.monotonic() if _dbg else 0.0
             obj = MessageQueue.recv(self.remote_socket, timeout)
+            if _dbg:
+                self._record_dequeue_dbg(
+                    wait=0.0,
+                    deserialize=time.monotonic() - _r0,
+                    payload_bytes=0,
+                    overflow=False,
+                    total=time.monotonic() - _t0,
+                    remote=True,
+                )
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj

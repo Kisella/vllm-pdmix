@@ -1073,6 +1073,10 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
+        _dbg = os.environ.get("VLLM_MQ_DEBUG_TIMING", "").lower() in (
+            "1", "true", "yes", "on"
+        )
+        _dbg_n = 0
         while True:
             # Poll local MQ for pp scheduler output from passive
             # EngineCore (non-blocking).
@@ -1115,11 +1119,29 @@ class WorkerProc:
             # Poll cross-node MQ with short timeout so we can
             # periodically check the local MQ.
             try:
+                _dq_t0 = time.monotonic() if _dbg else 0.0
                 method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                     timeout=0.1
                 )
             except TimeoutError:
                 continue
+
+            if _dbg:
+                _dq_ms = (time.monotonic() - _dq_t0) * 1000
+                _so = args[0] if (args and isinstance(args[0], SchedulerOutput)) else None
+                _bt = getattr(_so, "batch_type", None) if _so is not None else None
+                _n_new = len(_so.scheduled_new_reqs) if _so is not None else 0
+                _n_cached = _so.scheduled_cached_reqs.num_reqs if _so is not None else 0
+                _n_tok = _so.total_num_scheduled_tokens if _so is not None else 0
+                _ht = getattr(_so, "head_token", None) if _so is not None else None
+                _dbg_n += 1
+                if _dbg_n % 200 == 0 or _dq_ms >= 10:
+                    logger.info(
+                        "worker_dequeue[dbg] n=%d dq=%.2fms batch_type=%s "
+                        "new=%d cached=%d sched_tokens=%d head_token_set=%s",
+                        _dbg_n, _dq_ms, _bt, _n_new, _n_cached, _n_tok,
+                        _ht is not None,
+                    )
 
             # Skip execute_model from cross-node MQ on pp rank1 workers.
             # These workers execute model only when triggered by their
