@@ -697,10 +697,6 @@ class MessageQueue:
                     )
                 with self.buffer.get_data(self.current_idx) as buf:
                     yield buf
-                # found a block that is not read by this reader
-                # let caller read from the buffer
-                with self.buffer.get_data(self.current_idx) as buf:
-                    yield buf
 
                 # caller has read from the buffer
                 # set the read flag
