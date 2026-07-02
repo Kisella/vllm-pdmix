@@ -808,7 +808,7 @@ class MessageQueue:
             self._dbg_overflow_count += 1
         if self._dbg_n >= self._dbg_window:
             n = self._dbg_n
-            logger.info(
+            logger.error(
                 "MQ.dequeue[dbg] n=%d avg_total=%.2fms avg_wait=%.2fms "
                 "avg_deser=%.2fms max_payload=%.2fMB overflow=%d remote=%s",
                 n,

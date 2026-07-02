@@ -1136,12 +1136,54 @@ class WorkerProc:
                 _ht = getattr(_so, "head_token", None) if _so is not None else None
                 _dbg_n += 1
                 if _dbg_n % 200 == 0 or _dq_ms >= 10:
-                    logger.info(
+                    logger.error(
                         "worker_dequeue[dbg] n=%d dq=%.2fms batch_type=%s "
                         "new=%d cached=%d sched_tokens=%d head_token_set=%s",
                         _dbg_n, _dq_ms, _bt, _n_new, _n_cached, _n_tok,
                         _ht is not None,
                     )
+                # Field-level pickle breakdown — confirm which SchedulerOutput
+                # field dominates the payload (suspect: all_token_ids, which
+                # PDSeparatedScheduler unconditionally back-fills every step).
+                _brk = getattr(self, "_dbg_breakdown", None)
+                if _so is not None and _brk is None:
+                    _brk = os.environ.get(
+                        "VLLM_MQ_DEBUG_PAYLOAD_BREAKDOWN", ""
+                    ).lower() in ("1", "true", "yes", "on")
+                    self._dbg_breakdown = _brk
+                    self._dbg_brk_n = 0
+                if _so is not None and _brk:
+                    self._dbg_brk_n += 1
+                    if self._dbg_brk_n % 500 == 0 or _dq_ms >= 10:
+                        _cr = _so.scheduled_cached_reqs
+                        _fields = {
+                            "scheduled_new_reqs": _so.scheduled_new_reqs,
+                            "new_token_ids": getattr(_cr, "new_token_ids", None),
+                            "all_token_ids": getattr(_cr, "all_token_ids", None),
+                            "new_block_ids": getattr(_cr, "new_block_ids", None),
+                            "num_scheduled_tokens": _so.num_scheduled_tokens,
+                            "scheduled_spec_decode_tokens":
+                                _so.scheduled_spec_decode_tokens,
+                        }
+                        _parts = []
+                        _tot = 0
+                        for _fn, _fv in _fields.items():
+                            if _fv is None:
+                                continue
+                            try:
+                                _sz = len(pickle.dumps(
+                                    _fv, protocol=pickle.HIGHEST_PROTOCOL
+                                ))
+                            except Exception:
+                                _sz = -1
+                            _tot += max(_sz, 0)
+                            _parts.append(f"{_fn}={_sz/1024:.0f}KB")
+                        logger.error(
+                            "scheduler_output_breakdown[dbg] n=%d batch_type=%s "
+                            "cached=%d fields_total=%.1fKB %s",
+                            self._dbg_brk_n, _bt, _n_cached, _tot / 1024,
+                            " ".join(_parts),
+                        )
 
             # Skip execute_model from cross-node MQ on pp rank1 workers.
             # These workers execute model only when triggered by their
