@@ -1103,7 +1103,13 @@ class Scheduler(SchedulerInterface):
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
             if not scheduled_in_prev_step:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+                # np.ndarray(int32) on the wire: pickle protocol 5 routes numpy
+                # arrays through PickleBuffer, so deserialize is a zero-copy
+                # np.frombuffer (no per-int PyLong alloc) even when inlined
+                # (<1 MiB). ~halves bytes vs list[int] and avoids the
+                # PyLong-per-int GIL cost that dominated dequeue latency.
+                all_token_ids[req_id] = np.asarray(
+                    req.all_token_ids, dtype=np.int32)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )

@@ -160,7 +160,10 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     # For requests not scheduled in the last step, propagate the token ids to the
     # connector. Won't contain requests that were scheduled in the prior step.
-    all_token_ids: dict[str, list[int]]
+    # Values are np.ndarray(int32): pickle protocol 5 zerocopies them via
+    # PickleBuffer, avoiding the per-int PyLong alloc that dominated the worker
+    # dequeue (pickle.loads) cost under bench load.
+    all_token_ids: dict[str, "npt.NDArray[np.int32]"]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]

@@ -1324,7 +1324,12 @@ class GPUModelRunner(
                     # We must recover the output token ids for resumed requests in the
                     # async scheduling case, so that correct input_ids are obtained.
                     resumed_token_ids = req_data.all_token_ids[req_id]
-                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
+                    # resumed_token_ids is an np.ndarray(int32) on the wire
+                    # (see scheduler._make_cached_request_data). .tolist()
+                    # yields a native list[int] so downstream list ops
+                    # (.append/.extend/.clear/del) keep working.
+                    req_state.output_token_ids = resumed_token_ids[
+                        -num_output_tokens:].tolist()
 
                 reqs_to_add.append(req_state)
                 # Track resumed requests for ngram_gpu full tensor copy
