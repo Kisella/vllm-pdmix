@@ -1217,28 +1217,6 @@ class GPUModelRunner(
             self.prev_num_draft_tokens.np.fill(0)
 
         for i, req_id in enumerate(req_data.req_ids):
-            if req_id not in self.requests:
-                # [PD-DEBUG] This batch (typically a cloud-returned DECODE_LAST)
-                # references a req that is no longer in the worker's cached
-                # states -- i.e. the req was aborted / finished on the edge
-                # during the D-first -> D-last window, yet the cloud still
-                # shipped its DECODE_LAST back via POST_OUT. Log at ERROR for
-                # verification, then fall through to the original lookup below
-                # which raises the original KeyError (crash behavior preserved;
-                # do NOT skip, otherwise input_batch / token shapes would
-                # mismatch the cloud-side intermediate_tensors). Match by
-                # head_token / req_id with [CLOUD-DL-PUBLISH] /
-                # [EDGE-FINISH] / [EDGE-DL-RECV-STALE].
-                logger.error(
-                    "[EDGE-DL-UPDATE-MISS] req_id=%s not in self.requests. "
-                    "batch_type=%s head_token=%s req_ids=%s "
-                    "finished_req_ids=%s. About to raise KeyError.",
-                    req_id,
-                    scheduler_output.batch_type,
-                    getattr(scheduler_output, "head_token", None),
-                    list(req_data.req_ids),
-                    scheduler_output.finished_req_ids,
-                )
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
