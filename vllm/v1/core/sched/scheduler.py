@@ -174,11 +174,6 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
-        # [PD-DEBUG] Persistent map: every req ever freed -> str(status).
-        # Rebuilt into SchedulerOutput.finished_req_id_to_status at every
-        # schedule() so the status survives empty-P首 re-fill / deferred
-        # EMPTY merge. Grows with total finished reqs (debug-only).
-        self._ever_freed_status: dict[str, str] = {}
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -948,10 +943,6 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            finished_req_id_to_status={
-                r: self._ever_freed_status.get(r, "")
-                for r in self.finished_req_ids
-            },
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
@@ -1856,7 +1847,6 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
-        self._ever_freed_status[request_id] = request.status.name
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 

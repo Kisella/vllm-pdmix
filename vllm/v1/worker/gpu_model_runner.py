@@ -1420,22 +1420,6 @@ class GPUModelRunner(
                 if orig != req_state.prev_num_draft_len:
                     req_state.prev_num_draft_len = orig
 
-        # [PD-DEBUG] Observe free status (abort vs normal completion) for
-        # reqs whose finished_req_ids pop them from self.requests. Placed
-        # AFTER the cached_reqs loop so it does NOT shift the crash site
-        # (req_state = self.requests[req_id]) above. One logger.error per
-        # batch carrying finished reqs; no file I/O.
-        if scheduler_output.finished_req_ids:
-            _sm = scheduler_output.finished_req_id_to_status
-            logger.error(
-                "[EDGE-POP] batch_type=%s head_token=%s "
-                "finished_req_ids=%s free_status=%s",
-                scheduler_output.batch_type,
-                getattr(scheduler_output, "head_token", None),
-                scheduler_output.finished_req_ids,
-                {r: _sm.get(r, "") for r in scheduler_output.finished_req_ids},
-            )
-
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
