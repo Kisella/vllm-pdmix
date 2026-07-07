@@ -1185,7 +1185,7 @@ class WorkerProc:
                             )
                         except Exception:
                             _field_sizes[_fname] = -1
-                    logger.info(
+                    logger.error(
                         "[WorkerProc] execute_model scheduler_output "
                         "total_size=%d B; per-field sizes (B): %s",
                         _total,
