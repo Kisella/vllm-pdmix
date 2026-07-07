@@ -1851,6 +1851,18 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
         delay_free_blocks |= connector_delay_free_blocks
+        # [PD-DEBUG] Log every request free at ERROR. This catches BOTH
+        # client abort (finish_requests -> FINISHED_ABORTED) AND normal
+        # completion (update_from_output -> _handle_stopped_request calls
+        # _free_request DIRECTLY, bypassing finish_requests, so
+        # [EDGE-FINISH] does not fire for normal EOS / length / stop).
+        # ``request.status`` distinguishes abort vs completion;
+        # ``delay_free_blocks`` (final) shows whether the req is del'd
+        # from scheduler.requests now or kept for async KV transfer.
+        logger.error(
+            "[SCHED-FREE] req_id=%s status=%s delay_free_blocks=%s",
+            request_id, request.status, delay_free_blocks,
+        )
         if not delay_free_blocks:
             self._free_blocks(request)
 
