@@ -1174,7 +1174,7 @@ class WorkerProc:
                             protocol=pickle.HIGHEST_PROTOCOL,
                             buffer_callback=_oob.append,
                         )
-                        return len(_main) + sum(len(b) for b in _oob)
+                        return len(_main) + sum(len(b.raw()) for b in _oob)
 
                     _total = _pickled_size(_sched_out)
                     _field_sizes = {}
