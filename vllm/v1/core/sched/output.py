@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -260,6 +260,14 @@ class SchedulerOutput:
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
+    # [PD-DEBUG] req_id -> str(RequestStatus) for every req in
+    # finished_req_ids. Populated from the scheduler's persistent
+    # _ever_freed_status map (filled in _free_request) so the worker can
+    # tell abort (FINISHED_ABORTED) from normal completion
+    # (FINISHED_STOP/LENGTH/EOS) WITHOUT touching the crash site.
+    # Empty string => req is in finished_req_ids but never went through
+    # _free_request (contamination).
+    finished_req_id_to_status: dict[str, str] = field(default_factory=dict)
 
     # Whether any of the scheduled requests use structured output.
     # Set only in async scheduling case.
@@ -314,6 +322,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            finished_req_id_to_status={},
             batch_type=BatchType.EMPTY,
         )
 
