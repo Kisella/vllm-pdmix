@@ -1155,6 +1155,47 @@ class WorkerProc:
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
 
+                # [debug] Log the serialized size of scheduler_output and of
+                # each (variable) field for execute_model. Sizes use pickle
+                # protocol 5 with out-of-band buffers, the same encoding the
+                # MQ uses to transfer the object, so they reflect the true
+                # communication cost.
+                if (
+                    isinstance(method, str)
+                    and method == "execute_model"
+                    and args
+                ):
+                    _sched_out = args[0]
+
+                    def _pickled_size(_obj):
+                        _oob: list = []
+                        _main = pickle.dumps(
+                            _obj,
+                            protocol=pickle.HIGHEST_PROTOCOL,
+                            buffer_callback=_oob.append,
+                        )
+                        return len(_main) + sum(len(b) for b in _oob)
+
+                    _total = _pickled_size(_sched_out)
+                    _field_sizes = {}
+                    for _fname in _sched_out.__dataclass_fields__:
+                        try:
+                            _field_sizes[_fname] = _pickled_size(
+                                getattr(_sched_out, _fname)
+                            )
+                        except Exception:
+                            _field_sizes[_fname] = -1
+                    logger.info(
+                        "[WorkerProc] execute_model scheduler_output "
+                        "total_size=%d B; per-field sizes (B): %s",
+                        _total,
+                        sorted(
+                            _field_sizes.items(),
+                            key=lambda kv: kv[1],
+                            reverse=True,
+                        ),
+                    )
+
                 output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
