@@ -1080,6 +1080,20 @@ class GPUModelRunner(
                 getattr(scheduler_output, "head_token", None),
                 scheduler_output.finished_req_ids,
             )
+            try:
+                import os as _os
+                _p = _os.environ.get("PD_FREE_TRACE", "/tmp/pd_free_trace.log")
+                with open(_p, "a") as _f:
+                    _f.write(
+                        f"{time.time():.6f} pid={_os.getpid()} "
+                        f"tag=EDGE-REQ-REMOVE req_id={req_id} "
+                        f"batch_type={scheduler_output.batch_type} "
+                        f"head_token={getattr(scheduler_output, 'head_token', None)} "
+                        f"finished_req_ids={scheduler_output.finished_req_ids}\n"
+                    )
+                    _f.flush()
+            except Exception:
+                pass
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
@@ -1247,6 +1261,21 @@ class GPUModelRunner(
                     list(req_data.req_ids),
                     scheduler_output.finished_req_ids,
                 )
+                try:
+                    import os as _os
+                    _p = _os.environ.get("PD_FREE_TRACE", "/tmp/pd_free_trace.log")
+                    with open(_p, "a") as _f:
+                        _f.write(
+                            f"{time.time():.6f} pid={_os.getpid()} "
+                            f"tag=EDGE-DL-UPDATE-MISS req_id={req_id} "
+                            f"batch_type={scheduler_output.batch_type} "
+                            f"head_token={getattr(scheduler_output, 'head_token', None)} "
+                            f"req_ids={list(req_data.req_ids)} "
+                            f"finished_req_ids={scheduler_output.finished_req_ids}\n"
+                        )
+                        _f.flush()
+                except Exception:
+                    pass
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]

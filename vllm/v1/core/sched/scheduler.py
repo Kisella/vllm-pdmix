@@ -1851,6 +1851,18 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
         delay_free_blocks |= connector_delay_free_blocks
+        try:
+            import os as _os
+            _p = _os.environ.get("PD_FREE_TRACE", "/tmp/pd_free_trace.log")
+            with open(_p, "a") as _f:
+                _f.write(
+                    f"{time.time():.6f} pid={_os.getpid()} tag=SCHED-FREE "
+                    f"req_id={request_id} status={request.status} "
+                    f"delay_free_blocks={delay_free_blocks}\n"
+                )
+                _f.flush()
+        except Exception:
+            pass
         # [PD-DEBUG] Log every request free at ERROR. This catches BOTH
         # client abort (finish_requests -> FINISHED_ABORTED) AND normal
         # completion (update_from_output -> _handle_stopped_request calls
