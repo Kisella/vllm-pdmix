@@ -1072,14 +1072,6 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
-            logger.error(
-                "[EDGE-REQ-REMOVE] req_id=%s batch_type=%s head_token=%s "
-                "finished_req_ids=%s",
-                req_id,
-                scheduler_output.batch_type,
-                getattr(scheduler_output, "head_token", None),
-                scheduler_output.finished_req_ids,
-            )
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
