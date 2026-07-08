@@ -438,8 +438,26 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # [EDGE-ENQUEUE] 参考 passive_core.py:590 格式记录边侧 enqueue 耗时
+        _bt = "N/A"
+        if (
+            isinstance(method, str)
+            and method == "execute_model"
+            and args
+            and hasattr(args[0], "batch_type")
+            and args[0].batch_type is not None
+        ):
+            _bt = args[0].batch_type.value
+        _t0 = time.monotonic()
         self.rpc_broadcast_mq.enqueue(
             (send_method, args, kwargs, output_rank), local_only=local_only
+        )
+        _dt_ms = (time.monotonic() - _t0) * 1000
+        logger.info(
+            "[EDGE-ENQUEUE] %s enqueue took %.3f ms",
+            _bt,
+            _dt_ms,
         )
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
@@ -1133,9 +1151,11 @@ class WorkerProc:
             # Poll cross-node MQ with short timeout so we can
             # periodically check the local MQ.
             try:
+                _t0 = time.monotonic()
                 method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                     timeout=0.1
                 )
+                _dt_ms = (time.monotonic() - _t0) * 1000
             except TimeoutError:
                 continue
 
@@ -1196,6 +1216,16 @@ class WorkerProc:
                         ),
                     )
 
+                if method == "execute_model":
+                    _bt = (
+                        getattr(args[0], "batch_type", None)
+                        if args else None
+                    )
+                    logger.info(
+                        "[EDGE-DEQUEUE] dequeue took %.3f ms batch_type: %s",
+                        _dt_ms,
+                        _bt.value if _bt is not None else "N/A",
+                    )
                 output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
