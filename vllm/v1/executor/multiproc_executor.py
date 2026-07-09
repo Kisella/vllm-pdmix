@@ -1104,7 +1104,7 @@ class WorkerProc:
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
-                        logger.info(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11}")
+                        logger.error(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11}")
                         # Execute model with the received SchedulerOutput.
                         try:
                             func = getattr(self.worker, "execute_model")
@@ -1208,7 +1208,7 @@ class WorkerProc:
                             )
                         except Exception:
                             _field_sizes[_fname] = -1
-                    logger.error(
+                    logger.info(
                         "[WorkerProc] execute_model scheduler_output "
                         "total_size=%d B; per-field sizes (B): %s",
                         _total,
@@ -1224,7 +1224,7 @@ class WorkerProc:
                         getattr(args[0], "batch_type", None)
                         if args else None
                     )
-                    logger.info(
+                    logger.error(
                         "[EDGE-DEQUEUE] dequeue took %.3f ms batch_type: %s",
                         _dt_ms,
                         _bt.value if _bt is not None else "N/A",
