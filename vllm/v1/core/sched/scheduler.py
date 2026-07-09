@@ -1108,8 +1108,8 @@ class Scheduler(SchedulerInterface):
                 # np.frombuffer (no per-int PyLong alloc) even when inlined
                 # (<1 MiB). ~halves bytes vs list[int] and avoids the
                 # PyLong-per-int GIL cost that dominated dequeue latency.
-                all_token_ids[req_id] = np.asarray(
-                    req.all_token_ids, dtype=np.int32)
+                # Use Request-level cached view to avoid repeated conversion.
+                all_token_ids[req_id] = req.cached_all_token_ids_np
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
