@@ -1096,11 +1096,11 @@ class WorkerProc:
             # EngineCore (non-blocking).
             if self.local_rpc_broadcast_mq is not None:
                 try:
-                    t11 = time.perf_counter()
+                    t11 = time.perf_counter() * 1000
                     method, args, kwargs, output_rank = (
                         self.local_rpc_broadcast_mq.dequeue(timeout=0.1)
                     )
-                    t22 = time.perf_counter()
+                    t22 = time.perf_counter() * 1000
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
