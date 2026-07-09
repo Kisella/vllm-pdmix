@@ -1096,12 +1096,15 @@ class WorkerProc:
             # EngineCore (non-blocking).
             if self.local_rpc_broadcast_mq is not None:
                 try:
+                    t11 = time.perf_counter()
                     method, args, kwargs, output_rank = (
                         self.local_rpc_broadcast_mq.dequeue(timeout=0.1)
                     )
+                    t22 = time.perf_counter()
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
+                        logger.info(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11}")
                         # Execute model with the received SchedulerOutput.
                         try:
                             func = getattr(self.worker, "execute_model")
