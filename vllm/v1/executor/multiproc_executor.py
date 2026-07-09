@@ -1104,7 +1104,17 @@ class WorkerProc:
                     if isinstance(method, bytes) and method == b"pp_scheduler_output":
                         scheduler_output = args[0]
                         slice_info = args[1] if len(args) > 1 else None
-                        logger.error(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11}")
+
+                        def _pickled_size_local(_obj):
+                            _oob: list = []
+                            _main = pickle.dumps(
+                                _obj,
+                                protocol=pickle.HIGHEST_PROTOCOL,
+                                buffer_callback=_oob.append,
+                            )
+                            return len(_main) + sum(len(b.raw()) for b in _oob)
+                        _total_local = _pickled_size_local(scheduler_output)
+                        logger.error(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11} scheduler_output size: {_total_local}")
                         # Execute model with the received SchedulerOutput.
                         try:
                             func = getattr(self.worker, "execute_model")
