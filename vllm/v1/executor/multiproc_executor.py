@@ -1115,7 +1115,7 @@ class WorkerProc:
                             return len(_main) + sum(len(b.raw()) for b in _oob)
                         if get_tp_group().rank_in_group == 0:
                             _total_local = _pickled_size_local(scheduler_output)
-                            logger.error(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11} scheduler_output size: {_total_local}")
+                            logger.error(f"batch_type {scheduler_output.batch_type.value} dequeue time: {t22 - t11} scheduler_output size: {_total_local}  {t11} - {t22}")
                         # Execute model with the received SchedulerOutput.
                         try:
                             func = getattr(self.worker, "execute_model")
