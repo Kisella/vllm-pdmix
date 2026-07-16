@@ -325,6 +325,17 @@ class MultiModalRegistry:
         shared_worker_lock: LockType,
     ) -> BaseMultiModalReceiverCache | None:
         """Return a `BaseMultiModalReceiverCache` for the worker process."""
+        # Edge-Cloud: 云侧 worker 不做多模态处理。视觉塔只在边侧（首个 PP
+        # rank）运行，视觉特征已嵌入 hidden_states 并经 intermediate_tensors
+        # 透传到云侧，云侧只跑 Transformer 层。因此云侧不能 attach shm
+        # receiver cache——该 buffer 由边侧 engine 的
+        # ShmObjectStoreSenderCache(create=True) 创建，仅存在于边侧 /dev/shm，
+        # 云侧以 reader(create=False) 去 shm_open 会抛 FileNotFoundError。
+        parallel_config = vllm_config.parallel_config
+        if (parallel_config.enable_edge_cloud
+                and not parallel_config.is_edge_node):
+            return None
+
         cache_type = self._get_cache_type(vllm_config)
         if cache_type in (None, "processor_only", "lru"):
             return None
