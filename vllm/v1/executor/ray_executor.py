@@ -105,7 +105,7 @@ class RayDistributedExecutor(Executor):
         # [ascend insert] 边云协同模式需要更大的 batch queue 来填满
         # Head-Middle-Tail 多阶段流水线。
         if getattr(self.parallel_config, "enable_edge_cloud", False):
-            return 4
+            return 8
         return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:

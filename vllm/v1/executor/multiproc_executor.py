@@ -586,7 +586,7 @@ class MultiprocExecutor(Executor):
         # [ascend insert] 边云协同模式需要更大的 batch queue 来填满
         # Head-Middle-Tail 多阶段流水线。
         if getattr(self.parallel_config, "enable_edge_cloud", False):
-            return 4
+            return 8
         return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
@@ -1169,6 +1169,15 @@ class WorkerProc:
                             "__pp_scheduler_ack__": True,
                             "batch_type": scheduler_output.batch_type,
                             "head_token": getattr(scheduler_output, "head_token", None),
+                            # Phase C: draft heads enqueue with head_token=None;
+                            # the cloud keys the PDFF ack → PDFL publish on
+                            # draft_task_id (design §7.5 #28).  draft_step_idx
+                            # is carried too: one draft_task_id is shared by
+                            # every step of a prefill chain, so the cloud's
+                            # publish idempotency guard must be keyed on
+                            # (draft_task_id, draft_step_idx).
+                            "draft_task_id": getattr(scheduler_output, "draft_task_id", None),
+                            "draft_step_idx": getattr(scheduler_output, "draft_step_idx", None),
                             "hidden_channel": getattr(scheduler_output, "hidden_channel", None),
                         }
                         should_send_ack = (

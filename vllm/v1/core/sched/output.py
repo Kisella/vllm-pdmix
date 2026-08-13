@@ -125,10 +125,14 @@ class BatchType(enum.Enum):
                      edge head segment (Phase 4)
     - DECODE_LAST:   edge-cloud PD separation — decode batch executing the
                      edge tail segment (Phase 4)
-    - DRAFT_FIRST:   edge-cloud speculative draft batch executing the edge
-                     head segment for one draft step
-    - DRAFT_LAST:    edge-cloud speculative draft batch executing the edge
-                     tail segment for one draft step
+    - PREFILL_DRAFT_FIRST: prefill-phase draft chain head (edge->cloud,
+                     reuses the parent chunk's prefill channel)
+    - PREFILL_DRAFT_LAST:  prefill-phase draft chain tail (cloud->edge,
+                     same channel as its PREFILL_DRAFT_FIRST)
+    - DECODE_DRAFT_FIRST:  decode-phase draft chain head (edge->cloud,
+                     DECODE channel)
+    - DECODE_DRAFT_LAST:   decode-phase draft chain tail (cloud->edge,
+                     DECODE channel)
     """
     PD_MIX = "pd_mix"
     PURE_PREFILL = "pure_prefill"
@@ -139,8 +143,10 @@ class BatchType(enum.Enum):
     PREFILL_LAST = "prefill_last"
     DECODE_FIRST = "decode_first"
     DECODE_LAST = "decode_last"
-    DRAFT_FIRST = "draft_first"
-    DRAFT_LAST = "draft_last"
+    PREFILL_DRAFT_FIRST = "prefill_draft_first"
+    PREFILL_DRAFT_LAST = "prefill_draft_last"
+    DECODE_DRAFT_FIRST = "decode_draft_first"
+    DECODE_DRAFT_LAST = "decode_draft_last"
 
 
 @dataclass
@@ -388,7 +394,7 @@ class SchedulerOutput:
     draft_step_idx: int | None = None
 
     # Rejection-corrected sampling state produced by the edge target step.
-    # It is carried only by DRAFT_FIRST step 0 so the cloud can update its
+    # It is carried only by draft-FIRST step 0 so the cloud can update its
     # target/draft state before running the independently scheduled draft.
     num_accepted_tokens: list[int] | None = None
     valid_sampled_token_count: list[int] | None = None
