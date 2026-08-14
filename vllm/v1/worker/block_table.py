@@ -361,9 +361,16 @@ def _compute_slot_mapping_kernel(
         mask = offsets < end_idx
         pos = tl.load(positions_ptr + offsets, mask=mask, other=0)
         block_indices = pos // virtual_block_size
-        block_numbers = tl.load(block_table_ptr + row_offset + block_indices).to(
-            tl.int64
-        )
+        # Row-width clamp: an out-of-range block_index (e.g. the
+        # compressed C4 table's 256 columns vs pos // 2 for long
+        # sequences) must not load past the row end -- Triton returns
+        # garbage there and the DSA scatter reads it as a real slot.
+        # Such positions resolve to PAD_ID below.
+        in_bounds = block_indices < block_table_stride
+        safe_block_indices = tl.where(in_bounds, block_indices, 0)
+        block_numbers = tl.load(
+            block_table_ptr + row_offset + safe_block_indices
+        ).to(tl.int64)
 
         virtual_block_offsets = pos - block_indices * virtual_block_size
         is_local = (
@@ -377,4 +384,5 @@ def _compute_slot_mapping_kernel(
 
         slot_ids = block_numbers * block_size + local_block_offsets
         slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+        slot_ids = tl.where(in_bounds, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
