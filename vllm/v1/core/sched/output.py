@@ -37,6 +37,7 @@ class HiddenChannelType:
     _initialized: bool = False
     _MIN_PREFILL_POOL: int = 16
     _MIN_DECODE_POOL: int = 8
+    _MIN_DRAFT_POOL: int = 4
 
     def __init__(self, value: str) -> None:
         self._value = value
@@ -65,6 +66,7 @@ class HiddenChannelType:
         dp_size: int,
         prefill_per_dp: int = 2,
         decode_per_dp: int = 1,
+        draft_per_dp: int = 1,
     ) -> None:
         if cls._initialized:
             return
@@ -72,18 +74,31 @@ class HiddenChannelType:
 
         need_prefill = dp_size * prefill_per_dp
         need_decode = dp_size * decode_per_dp
+        need_draft = dp_size * draft_per_dp
         prefill_pool = cls._MIN_PREFILL_POOL
         decode_pool = cls._MIN_DECODE_POOL
+        draft_pool = cls._MIN_DRAFT_POOL
         while prefill_pool < need_prefill:
             prefill_pool *= 2
         while decode_pool < need_decode:
             decode_pool *= 2
+        while draft_pool < need_draft:
+            draft_pool *= 2
 
         for i in range(1, prefill_pool + 1):
             setattr(cls, f"PREFILL_{i}", cls(f"prefill_{i}"))
         for i in range(1, decode_pool + 1):
             setattr(cls, f"DECODE_{i}", cls(f"decode_{i}"))
         setattr(cls, "DECODE", getattr(cls, "DECODE_1"))
+        # MTP draft data-plane channel pool: DECODE_DRAFT_* batches travel on
+        # their own channel so the draft chain never contends with (or
+        # head-of-line blocks) the shared DECODE channel.  This is what lets
+        # the scheduler relax the draft inflight serialization gate
+        # (``remote_pending == 0`` -> ``< limit``): the gate only existed
+        # because draft shared one channel with normal decode batches.
+        for i in range(1, draft_pool + 1):
+            setattr(cls, f"DRAFT_{i}", cls(f"draft_{i}"))
+        setattr(cls, "DRAFT", getattr(cls, "DRAFT_1"))
 
     @staticmethod
     def prefill(i: int) -> "HiddenChannelType":
@@ -92,6 +107,10 @@ class HiddenChannelType:
     @staticmethod
     def decode(i: int) -> "HiddenChannelType":
         return getattr(HiddenChannelType, f"DECODE_{i}")
+
+    @staticmethod
+    def draft(i: int) -> "HiddenChannelType":
+        return getattr(HiddenChannelType, f"DRAFT_{i}")
 
 
 HiddenChannelType.init(dp_size=8)

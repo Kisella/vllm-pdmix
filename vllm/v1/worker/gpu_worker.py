@@ -90,11 +90,32 @@ class AsyncIntermediateTensors(IntermediateTensors):
         tensors: dict[str, torch.Tensor],
         comm_handles: list[Handle] | None = None,
         comm_postprocess: list[Callable[[], None]] | None = None,
+        comm_event: Any = None,
     ) -> None:
         super().__init__(tensors)
         self._comm_handles = comm_handles
         self._comm_postprocess = comm_postprocess
+        # Optional device event recorded on the recv stream right after the
+        # irecv(s) were issued (edge-cloud PD separation).  When present,
+        # ``is_ready()`` gives a non-blocking readiness probe for the *recv
+        # transfer only* - the TP broadcast / split postprocess chain is NOT
+        # covered by this event and still requires ``wait_for_comm()``.
+        self._comm_event = comm_event
         self._comm_waited = False
+
+    def is_ready(self) -> bool:
+        """Non-blocking probe: has the underlying irecv completed?
+
+        Returns False when no event was recorded (e.g. TP ranks other than
+        the PP-NPU0 rank, which receive via TP broadcast) or when the event
+        has not fired yet.  Callers must treat a True result as "the recv
+        transfer is done", NOT as "the tensors are fully postprocessed" -
+        ``wait_for_comm()`` still has to run the postprocess chain.
+        """
+        event = self._comm_event
+        if event is None:
+            return False
+        return bool(event.query())
 
     def wait_for_comm(self) -> None:
         if self._comm_waited:

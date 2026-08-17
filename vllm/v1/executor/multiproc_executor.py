@@ -787,6 +787,19 @@ class WorkerProc:
         if getattr(self, "cloud_recv_hint_mq", None) is not None:
             self._start_early_recv_guard()
 
+        # [EHER-draft] Edge-side draft-recv readiness reporting: when this
+        # edge worker (TP0 by construction - the MQ is only rebuilt on
+        # local_rank==0 and only the PP-NPU0 rank posts draft recvs) owns
+        # edge_recv_ready_mq, start the readiness report thread.  busy_loop
+        # blocks inside execute_model for whole batch durations and inside
+        # dequeue(0.1) when idle, so the report thread (not busy_loop) owns
+        # the probe: it polls the cached entries' NPU events and publishes
+        # ready head_tokens so the scheduler can dispatch the matching DDL
+        # the moment the transfer lands.  query() only - never wait(): the
+        # HCCL cross-thread constraint from the CHER guard applies here too.
+        if getattr(self, "edge_recv_ready_mq", None) is not None:
+            self._start_draft_ready_report()
+
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
@@ -1339,6 +1352,91 @@ class WorkerProc:
                             )
             if not posted:
                 time.sleep(0.0001)
+
+    # ------------------------------------------------------------------ #
+    # [EHER-draft] Edge-side draft-recv readiness report thread.         #
+    # ------------------------------------------------------------------ #
+    def _start_draft_ready_report(self) -> None:
+        """Start the DDL recv readiness report thread (edge TP0 only).
+
+        The worker posts the DDL return irecv at DDF time and caches the
+        AsyncIntermediateTensors by head_token; this thread probes each
+        cached entry's ``__comm_event__`` (``event.query()``, non-blocking)
+        and publishes head_tokens whose transfer has completed onto the
+        sideband ``edge_recv_ready_mq``.  The EngineCore drains them next
+        to the POST_OUT inbox and the PDSeparatedScheduler gates its DDL
+        dispatch on the ack.
+        """
+        if getattr(self, "_draft_ready_report_started", False):
+            return
+        worker = getattr(self, "worker", None)
+        if worker is None or not hasattr(worker, "_draft_recv_cache"):
+            return
+        self._draft_ready_report_started = True
+        self._draft_ready_report_shutdown = False
+        self._draft_ready_report_thread = threading.Thread(
+            target=self._draft_ready_report_loop,
+            name="eher-draft-ready-report",
+            daemon=True,
+        )
+        self._draft_ready_report_thread.start()
+        logger.info("[EHER-draft] readiness report thread started")
+
+    def _draft_ready_report_loop(self) -> None:
+        """Probe cached draft recvs and ack the ready ones (query only).
+
+        Only ``event.query()`` happens here - a pure host-side status read
+        that enqueues no device op - so it is safe to run while busy_loop
+        issues isend/execute_model on the same channel (contrast the CHER
+        guard note: a cross-thread ``wait()`` is what deadlocks HCCL).
+        Each head_token is reported at most once per flight: consumption
+        (``_consume_draft_recv``) removes both the cache entry and the
+        reported marker, so the next DDF with the same token starts clean.
+        """
+        try:
+            from vllm.platforms import current_platform
+            worker = getattr(self, "worker", None)
+            if worker is not None and hasattr(worker, "device"):
+                current_platform.set_device(worker.device)
+        except Exception:
+            logger.exception(
+                "[EHER-draft] report thread failed to set device"
+            )
+
+        ready_mq = getattr(self, "edge_recv_ready_mq", None)
+        worker = getattr(self, "worker", None)
+
+        while not getattr(self, "_draft_ready_report_shutdown", False):
+            reported = False
+            try:
+                with worker._draft_recv_lock:
+                    pending = [
+                        ht for ht in worker._draft_recv_cache
+                        if ht not in worker._draft_recv_reported
+                    ]
+                for ht in pending:
+                    with worker._draft_recv_lock:
+                        entry = worker._draft_recv_cache.get(ht)
+                        if entry is None:
+                            # Consumed between the snapshot and now.
+                            continue
+                        if ht in worker._draft_recv_reported:
+                            continue
+                    if entry.is_ready():
+                        ready_mq.enqueue(
+                            (b"draft_recv_ready", (ht,), {}, None)
+                        )
+                        with worker._draft_recv_lock:
+                            worker._draft_recv_reported.add(ht)
+                        reported = True
+            except Exception:
+                logger.exception(
+                    "[EHER-draft] readiness probe failed; retrying"
+                )
+            if not reported:
+                # Entries are few (one per in-flight DDL) so the busy spin
+                # is cheap; back off only when idle.
+                time.sleep(0.0002)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
