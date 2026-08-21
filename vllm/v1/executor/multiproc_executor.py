@@ -1202,10 +1202,35 @@ class WorkerProc:
                                 self.handle_output(e)
                             continue
                         # For layer slicing: non-last slices produce
-                        # no external output; keep polling local MQ for
-                        # the next slice.  Last slice (or no slicing)
-                        # follows the normal flow.
+                        # no external output.  Emit a lightweight slice-done
+                        # notification so the passive EngineCore can release
+                        # the next P slice as soon as this worker goes idle,
+                        # then keep polling local MQ.  Last slice (or no
+                        # slicing) follows the normal ack flow below.
+                        should_send_ack = (
+                            (output_rank is None and self.local_rank == 0)
+                            or self.rank == output_rank
+                        )
                         if slice_info is not None and not slice_info.is_last_slice:
+                            if should_send_ack:
+                                response_mq = (
+                                    self.local_worker_response_mq
+                                    if self.local_worker_response_mq is not None
+                                    else self.worker_response_mq
+                                )
+                                if response_mq is not None:
+                                    response_mq.enqueue(
+                                        (
+                                            WorkerProc.ResponseStatus.SUCCESS,
+                                            {
+                                                "__pp_slice_done__": True,
+                                                "batch_type": scheduler_output.batch_type,
+                                                "head_token": getattr(
+                                                    scheduler_output, "head_token", None
+                                                ),
+                                            },
+                                        )
+                                    )
                             continue
                         ack = {
                             "__pp_scheduler_ack__": True,
@@ -1213,10 +1238,6 @@ class WorkerProc:
                             "head_token": getattr(scheduler_output, "head_token", None),
                             "hidden_channel": getattr(scheduler_output, "hidden_channel", None),
                         }
-                        should_send_ack = (
-                            (output_rank is None and self.local_rank == 0)
-                            or self.rank == output_rank
-                        )
                         if should_send_ack:
                             response_mq = (
                                 self.local_worker_response_mq
