@@ -152,10 +152,15 @@ class BatchType(enum.Enum):
                      edge head segment (Phase 4)
     - DECODE_LAST:   edge-cloud PD separation — decode batch executing the
                      edge tail segment (Phase 4)
-    - DRAFT_FIRST:   edge-cloud speculative draft batch executing the edge
-                     head segment for one draft step
-    - DRAFT_LAST:    edge-cloud speculative draft batch executing the edge
-                     tail segment for one draft step
+
+    The scheduled draft types are split by the phase of the chain they
+    belong to:
+    - PREFILL_DRAFT_FIRST / PREFILL_DRAFT_LAST: prefill-phase draft chain
+      (parent tail is a PREFILL_LAST), traveling on the dedicated
+      PREFILL_DRAFT channel pair.
+    - DECODE_DRAFT_FIRST / DECODE_DRAFT_LAST: decode-phase draft chain
+      (parent tail is a DECODE_LAST), sharing the DECODE channel pair
+      with plain decode traffic.
     """
     PD_MIX = "pd_mix"
     PURE_PREFILL = "pure_prefill"
@@ -166,8 +171,10 @@ class BatchType(enum.Enum):
     PREFILL_LAST = "prefill_last"
     DECODE_FIRST = "decode_first"
     DECODE_LAST = "decode_last"
-    DRAFT_FIRST = "draft_first"
-    DRAFT_LAST = "draft_last"
+    PREFILL_DRAFT_FIRST = "prefill_draft_first"
+    PREFILL_DRAFT_LAST = "prefill_draft_last"
+    DECODE_DRAFT_FIRST = "decode_draft_first"
+    DECODE_DRAFT_LAST = "decode_draft_last"
 
 
 @dataclass
@@ -423,17 +430,20 @@ class SchedulerOutput:
     # that carry no cross-node traffic (EMPTY, legacy PD_MIX, ...).
     comm_seqno: int | None = None
 
-    # True when a DRAFT_FIRST/DRAFT_LAST belongs to a prefill-phase draft
-    # chain (its parent tail is a PREFILL_LAST): such chains travel on the
-    # dedicated PREFILL_DRAFT channel pair, decoupled from decode traffic.
-    # Decode-phase chains (parent DECODE_LAST) keep the DECODE pair.
+    # True when a PREFILL_DRAFT_FIRST/PREFILL_DRAFT_LAST (or a
+    # DECODE_DRAFT_FIRST/DECODE_DRAFT_LAST, False) belongs to a
+    # prefill-phase draft chain: such chains travel on the dedicated
+    # PREFILL_DRAFT channel pair, decoupled from decode traffic.
+    # Redundant with the batch type (kept for hint payloads and
+    # defensive checks).
     draft_prefill_phase: bool = False
 
     # First comm seqno of the draft chain that will follow this batch,
     # reserved by the edge scheduler at PF/DF pick time (chain steps take
     # draft_seqno_base + draft_step_idx).  Lets both peers pre-post all n
     # draft recv requests the moment the parent batch is published, before
-    # any DRAFT_FIRST SO exists.  None when scheduled draft is inactive.
+    # any PREFILL_DRAFT_FIRST/DECODE_DRAFT_FIRST SO exists.  None when
+    # scheduled draft is inactive.
     draft_seqno_base: int | None = None
 
     # True when every request covered by this draft chain has finished or
@@ -444,8 +454,9 @@ class SchedulerOutput:
     draft_chain_dead: bool = False
 
     # Rejection-corrected sampling state produced by the edge target step.
-    # It is carried only by DRAFT_FIRST step 0 so the cloud can update its
-    # target/draft state before running the independently scheduled draft.
+    # It is carried only by draft step 0 (PREFILL_DRAFT_FIRST /
+    # DECODE_DRAFT_FIRST) so the cloud can update its target/draft state
+    # before running the independently scheduled draft.
     num_accepted_tokens: list[int] | None = None
     valid_sampled_token_count: list[int] | None = None
 
