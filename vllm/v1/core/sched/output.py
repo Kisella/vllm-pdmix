@@ -430,6 +430,19 @@ class SchedulerOutput:
     # that carry no cross-node traffic (EMPTY, legacy PD_MIX, ...).
     comm_seqno: int | None = None
 
+    # Edge dispatch-order seqno (edge-cloud PD separation).  The edge
+    # scheduler (the single ordering authority) stamps a monotonically
+    # increasing value on every FIRST batch at dispatch time (== data-plane
+    # send order).  FIRST and its self-posted LAST copies share the value,
+    # so the edge's fallback tail dispatch (D尾/DDraft尾/PDraft尾, same
+    # priority) and the cloud's head dispatch both order by it, matching
+    # the wire even when the control plane arrives out of order.  Unlike
+    # ``comm_seqno`` (per-channel), this is one global sequence across all
+    # channels.  None on batches that carry no cross-node traffic (EMPTY,
+    # legacy PD_MIX, ...).  A dataclass field (not a dynamic attribute) so
+    # that dataclasses.replace() keeps it on the self-posted tail copies.
+    edge_so_seqno: int | None = None
+
     # True when a PREFILL_DRAFT_FIRST/PREFILL_DRAFT_LAST (or a
     # DECODE_DRAFT_FIRST/DECODE_DRAFT_LAST, False) belongs to a
     # prefill-phase draft chain: such chains travel on the dedicated
